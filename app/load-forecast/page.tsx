@@ -3,6 +3,8 @@ import NavTabs from "../components/NavTabs";
 
 export const revalidate = 60; // re-fetch AESO data at most once per minute
 
+/* ---------- Types ---------- */
+
 type AesoForecastRow = {
   he: number;
   forecastPoolPrice: number | null;
@@ -11,9 +13,19 @@ type AesoForecastRow = {
   actualAil: number | null;
 };
 
-type AesoForecastDay = {
-  dateLabel: string; // e.g. "November 19, 2025"
+type AesoFetchResult = {
+  dateLabel: string;
   rows: AesoForecastRow[];
+  debug: {
+    ok: boolean;
+    status: number | null;
+    statusText: string;
+    error?: string;
+    lineCount: number;
+    sampleLines: string[];
+    parsedRowCount: number;
+    parsedSample: AesoForecastRow[];
+  };
 };
 
 /* ---------- Utilities ---------- */
@@ -82,84 +94,108 @@ function getCurrentHeInAlberta(): number {
   return he;
 }
 
-/* ---------- AESO fetch (no synthetic at all) ---------- */
+/* ---------- AESO fetch with rich debug ---------- */
 
-async function fetchAesoActualForecastToday(): Promise<AesoForecastDay | null> {
+async function fetchAesoActualForecastToday(): Promise<AesoFetchResult> {
   const url =
     "http://ets.aeso.ca/ets_web/ip/Market/Reports/ActualForecastWMRQHReportServlet?contentType=csv";
 
-  const res = await fetch(url, { cache: "no-store" });
-  if (!res.ok) {
-    console.error("AESO ActualForecast fetch failed:", res.status, res.statusText);
-    return null;
-  }
-
-  const text = await res.text();
-  const rawLines = text.split(/\r?\n/);
+  const debug: AesoFetchResult["debug"] = {
+    ok: false,
+    status: null,
+    statusText: "",
+    error: undefined,
+    lineCount: 0,
+    sampleLines: [],
+    parsedRowCount: 0,
+    parsedSample: [],
+  };
 
   let dateLabel = "";
   const rows: AesoForecastRow[] = [];
 
-  for (const raw of rawLines) {
-    const line = raw.trim();
-    if (!line) continue;
+  try {
+    const res = await fetch(url, { cache: "no-store" });
+    debug.status = res.status;
+    debug.statusText = res.statusText;
+    debug.ok = res.ok;
 
-    // Title / section headers we don't need
-    if (line.startsWith("Actual / Forecast")) continue;
-    if (line.startsWith("Date,Forecast Pool Price")) continue;
+    const text = await res.text();
 
-    // Capture the "November 19, 2025." line as a friendly label
-    const monthMatch = line.match(
-      /^"?(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}/
-    );
-    if (monthMatch) {
-      dateLabel = monthMatch[0].replace(/^"|"$/g, "");
-      continue;
+    const lines = text.split(/\r?\n/);
+    debug.lineCount = lines.length;
+    debug.sampleLines = lines.slice(0, 12);
+
+    for (const raw of lines) {
+      const line = raw.trim();
+      if (!line) continue;
+
+      // Title / section headers
+      if (line.startsWith("Actual / Forecast")) continue;
+      if (line.startsWith("Date,Forecast Pool Price")) continue;
+
+      // Capture the "November 19, 2025." style label
+      const monthMatch = line.match(
+        /^"?(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}/
+      );
+      if (monthMatch) {
+        dateLabel = monthMatch[0].replace(/^"|"$/g, "");
+        continue;
+      }
+
+      // Everything else: try to parse as a data row
+      const parts = parseCsvLine(line);
+      if (parts.length < 5) continue;
+
+      const dateFieldRaw = parts[0] ?? "";
+      const dateField = dateFieldRaw.replace(/"/g, "").trim(); // e.g. 11/19/2025 01
+      const m = dateField.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2})$/);
+      if (!m) continue;
+
+      const he = parseInt(m[4], 10);
+      if (!Number.isFinite(he) || he < 1 || he > 24) continue;
+
+      const forecastPoolPrice = toNumOrNull(parts[1]);
+      const actualPoolPrice = toNumOrNull(parts[2]);
+      const forecastAil = toNumOrNull(parts[3]);
+      const actualAil = toNumOrNull(parts[4]);
+
+      rows.push({
+        he,
+        forecastPoolPrice,
+        actualPoolPrice,
+        forecastAil,
+        actualAil,
+      });
     }
 
-    // Data rows start with something like "11/19/2025 01"
-    if (!/^\d{1,2}\/\d{1,2}\/\d{4}/.test(line)) continue;
+    rows.sort((a, b) => a.he - b.he);
 
-    const parts = parseCsvLine(line);
-    if (parts.length < 5) continue;
+    debug.parsedRowCount = rows.length;
+    debug.parsedSample = rows.slice(0, 8);
 
-    const dateField = parts[0].replace(/"/g, "").trim(); // "11/19/2025 01"
-    const m = dateField.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2})$/);
-    if (!m) continue;
-    const he = parseInt(m[4], 10);
-    if (!Number.isFinite(he) || he < 1 || he > 24) continue;
-
-    const forecastPoolPrice = toNumOrNull(parts[1]);
-    const actualPoolPrice = toNumOrNull(parts[2]);
-    const forecastAil = toNumOrNull(parts[3]);
-    const actualAil = toNumOrNull(parts[4]);
-
-    rows.push({
-      he,
-      forecastPoolPrice,
-      actualPoolPrice,
-      forecastAil,
-      actualAil,
-    });
+    if (!dateLabel) {
+      dateLabel = "Today (AESO Actual/Forecast)";
+    }
+  } catch (err: any) {
+    debug.error = err?.message ?? String(err);
   }
 
-  if (rows.length === 0) return null;
-
-  rows.sort((a, b) => a.he - b.he);
-
-  if (!dateLabel) {
-    // Fallback: build a simple ISO-like label from the first row's date
-    dateLabel = "Today (AESO Actual / Forecast)";
-  }
-
-  return { dateLabel, rows };
+  return {
+    dateLabel,
+    rows,
+    debug,
+  };
 }
 
 /* ---------- Page component ---------- */
 
 export default async function LoadForecastPage() {
-  const data = await fetchAesoActualForecastToday();
+  const result = await fetchAesoActualForecastToday();
+  const { dateLabel, rows, debug } = result;
   const nowHe = getCurrentHeInAlberta();
+
+  const hasData = rows.length > 0;
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100">
@@ -185,20 +221,32 @@ export default async function LoadForecastPage() {
                 AESO ActualForecastWMRQH (CSV)
               </span>
             </div>
-            {data && (
-              <>
-                <div className="h-3 w-px bg-slate-700" />
-                <div className="font-mono text-slate-400">
-                  Report date:{" "}
-                  <span className="text-slate-100">{data.dateLabel}</span>
-                </div>
-                <div className="h-3 w-px bg-slate-700" />
-                <div className="font-mono text-slate-400">
-                  Rows parsed:{" "}
-                  <span className="text-slate-100">{data.rows.length}</span>
-                </div>
-              </>
-            )}
+
+            <div className="h-3 w-px bg-slate-700" />
+            <div className="font-mono text-slate-400">
+              Report date:&nbsp;
+              <span className="text-slate-100">
+                {dateLabel || "unknown"}
+              </span>
+            </div>
+
+            <div className="h-3 w-px bg-slate-700" />
+            <div className="font-mono text-slate-400">
+              HTTP:&nbsp;
+              <span
+                className={
+                  debug.ok ? "text-emerald-300" : "text-amber-300"
+                }
+              >
+                {debug.status ?? "—"} {debug.statusText || ""}
+              </span>
+            </div>
+
+            <div className="h-3 w-px bg-slate-700" />
+            <div className="font-mono text-slate-400">
+              Parsed rows:&nbsp;
+              <span className="text-slate-100">{debug.parsedRowCount}</span>
+            </div>
           </div>
         </header>
 
@@ -213,9 +261,42 @@ export default async function LoadForecastPage() {
           </div>
 
           <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/40">
-            {!data ? (
-              <div className="px-4 py-6 text-xs text-slate-400">
-                Unable to load AESO Actual/Forecast data right now.
+            {!hasData ? (
+              <div className="px-4 py-6 text-xs text-slate-300 space-y-3">
+                <div>Unable to render AESO Actual/Forecast data.</div>
+                <details className="rounded-lg border border-slate-800 bg-slate-950/70 px-3 py-2">
+                  <summary className="cursor-pointer text-[11px] text-slate-400">
+                    Debug details (server-side)
+                  </summary>
+                  <div className="mt-2 space-y-2 text-[11px]">
+                    <div>
+                      <span className="font-semibold">Status:</span>{" "}
+                      {debug.status} {debug.statusText}
+                    </div>
+                    {debug.error && (
+                      <div>
+                        <span className="font-semibold">Error:</span>{" "}
+                        {debug.error}
+                      </div>
+                    )}
+                    <div>
+                      <span className="font-semibold">Line count:</span>{" "}
+                      {debug.lineCount}
+                    </div>
+                    <div>
+                      <span className="font-semibold">Sample lines:</span>
+                      <pre className="mt-1 max-h-40 overflow-auto rounded bg-slate-900/90 p-2 font-mono text-[10px] leading-snug text-slate-200">
+                        {debug.sampleLines.join("\n")}
+                      </pre>
+                    </div>
+                    <div>
+                      <span className="font-semibold">Parsed sample:</span>
+                      <pre className="mt-1 max-h-40 overflow-auto rounded bg-slate-900/90 p-2 font-mono text-[10px] leading-snug text-slate-200">
+                        {JSON.stringify(debug.parsedSample, null, 2)}
+                      </pre>
+                    </div>
+                  </div>
+                </details>
               </div>
             ) : (
               <table className="min-w-full text-left text-xs">
@@ -231,7 +312,7 @@ export default async function LoadForecastPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {data.rows.map((row) => {
+                  {rows.map((row) => {
                     const useActual = row.he <= nowHe;
                     const useActualPrice = row.he <= nowHe;
 
@@ -259,11 +340,17 @@ export default async function LoadForecastPage() {
                         </td>
                         <td className="px-3 py-2 text-[11px] text-slate-300">
                           $
-                          {formatNumber(row.forecastPoolPrice, 2 /* keep cents */)}
+                          {formatNumber(
+                            row.forecastPoolPrice,
+                            2 /* keep cents */
+                          )}
                         </td>
                         <td className="px-3 py-2 text-[11px] text-slate-300">
                           $
-                          {formatNumber(row.actualPoolPrice, 2 /* keep cents */)}
+                          {formatNumber(
+                            row.actualPoolPrice,
+                            2 /* keep cents */
+                          )}
                         </td>
                         <td className="px-3 py-2 text-[11px]">
                           {useActualPrice ? "TRUE" : "FALSE"}
