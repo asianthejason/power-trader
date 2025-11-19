@@ -346,8 +346,10 @@ async function fetchAeso7DayCapabilityCells(): Promise<{
 
 type AvgRow = {
   fuel: string;
-  pct: number;
-  availableMw: number | null;
+  pctToday: number | null;
+  availableMwToday: number | null;
+  pctNext: number | null;
+  availableMwNext: number | null;
 };
 
 type MultiHourRow = {
@@ -443,9 +445,20 @@ export default async function CapabilityPage() {
     capCellsForDate = capCells.filter((c) => c.date === capDate);
   }
 
+  const allCapDates = Array.from(new Set(capCells.map((c) => c.date))).sort();
+  const currentDateIndex = allCapDates.indexOf(capDate);
+  const nextCapDate =
+    currentDateIndex >= 0 && currentDateIndex + 1 < allCapDates.length
+      ? allCapDates[currentDateIndex + 1]
+      : null;
+  const capCellsForNextDate = nextCapDate
+    ? capCells.filter((c) => c.date === nextCapDate)
+    : [];
+
   const hasCapability = capCellsForDate.length > 0;
 
-  const dailyAvgAvailByFuel: Record<string, number> = {};
+  // Daily averages for current date
+  const dailyAvgToday: Record<string, number> = {};
   if (hasCapability) {
     const sums: Record<string, { sum: number; count: number }> = {};
     for (const c of capCellsForDate) {
@@ -454,25 +467,60 @@ export default async function CapabilityPage() {
       sums[c.fuel].count += 1;
     }
     for (const [fuel, { sum, count }] of Object.entries(sums)) {
-      dailyAvgAvailByFuel[fuel] = sum / Math.max(count, 1);
+      dailyAvgToday[fuel] = sum / Math.max(count, 1);
     }
   }
 
-  // Build availability maps by HE for the selected date.
+  // Daily averages for next date (if present)
+  const dailyAvgNext: Record<string, number> = {};
+  if (capCellsForNextDate.length) {
+    const sumsNext: Record<string, { sum: number; count: number }> = {};
+    for (const c of capCellsForNextDate) {
+      if (!sumsNext[c.fuel]) sumsNext[c.fuel] = { sum: 0, count: 0 };
+      sumsNext[c.fuel].sum += c.availabilityPct;
+      sumsNext[c.fuel].count += 1;
+    }
+    for (const [fuel, { sum, count }] of Object.entries(sumsNext)) {
+      dailyAvgNext[fuel] = sum / Math.max(count, 1);
+    }
+  }
+
+  // Build availability maps by HE for current date.
   const availByHe: Record<number, Record<string, number>> = {};
   for (const c of capCellsForDate) {
     if (!availByHe[c.he]) availByHe[c.he] = {};
     availByHe[c.he][c.fuel] = c.availabilityPct;
   }
 
+  // Availability maps for next date (for HE1 when currentHe=24)
+  const availByHeNextDay: Record<number, Record<string, number>> = {};
+  for (const c of capCellsForNextDate) {
+    if (!availByHeNextDay[c.he]) availByHeNextDay[c.he] = {};
+    availByHeNextDay[c.he][c.fuel] = c.availabilityPct;
+  }
+
+  // Previous HE: same date only; HE1 has no previous.
   const prevHe = currentHe > 1 ? currentHe - 1 : null;
-  const nextHe = currentHe < 24 ? currentHe + 1 : null;
 
   const prevAvailByFuel =
     prevHe != null && availByHe[prevHe] ? availByHe[prevHe] : {};
   const currAvailByFuel = availByHe[currentHe] ?? {};
-  const nextAvailByFuel =
-    nextHe != null && availByHe[nextHe] ? availByHe[nextHe] : {};
+
+  // Next HE: same date if HE < 24, otherwise next day's HE1 if available.
+  let nextAvailByFuel: Record<string, number> = {};
+  let nextLabel: string;
+
+  if (currentHe < 24) {
+    const h = currentHe + 1;
+    nextAvailByFuel = availByHe[h] ?? {};
+    nextLabel = `HE ${formatHe(h)}`;
+  } else {
+    // currentHe === 24
+    const hasNextDayHe1 =
+      capCellsForNextDate.length > 0 && !!availByHeNextDay[1];
+    nextAvailByFuel = hasNextDayHe1 ? availByHeNextDay[1] : {};
+    nextLabel = hasNextDayHe1 ? `HE 01 (next day)` : "Next HE";
+  }
 
   // Multi-hour rows (prev / current / next) sorted by current available MW.
   const allFuelsSet = new Set<string>([
@@ -512,27 +560,47 @@ export default async function CapabilityPage() {
     return a.fuel.localeCompare(b.fuel);
   });
 
-  // Daily averages rows for the second table.
-  const avgRows: AvgRow[] = Object.keys(dailyAvgAvailByFuel).map((fuel) => {
-    const pct = dailyAvgAvailByFuel[fuel];
+  // Daily averages rows (current date + next date).
+  const allAvgFuels = new Set<string>([
+    ...Object.keys(dailyAvgToday),
+    ...Object.keys(dailyAvgNext),
+  ]);
+
+  const avgRows: AvgRow[] = [];
+  for (const fuel of allAvgFuels) {
     const mcMw = getFuelRatedCapacityMw(fuel);
-    const availableMw =
-      mcMw != null && pct != null && !Number.isNaN(pct)
-        ? (mcMw * pct) / 100
+
+    const pctToday = dailyAvgToday[fuel] ?? null;
+    const pctNext = dailyAvgNext[fuel] ?? null;
+
+    const availableMwToday =
+      mcMw != null && pctToday != null && !Number.isNaN(pctToday)
+        ? (mcMw * pctToday) / 100
         : null;
-    return { fuel, pct, availableMw };
-  });
+
+    const availableMwNext =
+      mcMw != null && pctNext != null && !Number.isNaN(pctNext)
+        ? (mcMw * pctNext) / 100
+        : null;
+
+    avgRows.push({
+      fuel,
+      pctToday,
+      availableMwToday,
+      pctNext,
+      availableMwNext,
+    });
+  }
 
   avgRows.sort((a, b) => {
-    const av = a.availableMw ?? 0;
-    const bv = b.availableMw ?? 0;
+    const av = a.availableMwToday ?? 0;
+    const bv = b.availableMwToday ?? 0;
     if (bv !== av) return bv - av;
     return a.fuel.localeCompare(b.fuel);
   });
 
   const prevLabel = prevHe ? `HE ${formatHe(prevHe)}` : "Prev HE";
   const currLabel = `HE ${formatHe(currentHe)}`;
-  const nextLabel = nextHe ? `HE ${formatHe(nextHe)}` : "Next HE";
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100">
@@ -649,7 +717,8 @@ export default async function CapabilityPage() {
                 <span className="text-xs text-slate-400">
                   From AESO 7-Day Hourly Available Capability report, date{" "}
                   {capDate}. Current HE {formatHe(currentHe)}; previous/next
-                  show adjacent HE values when available.
+                  show adjacent HE values (including across days when
+                  available).
                 </span>
               ) : (
                 <span className="text-xs text-amber-300">
@@ -753,24 +822,41 @@ export default async function CapabilityPage() {
 
           {/* Average capability over the day */}
           <section className="space-y-3">
-            <h2 className="text-lg font-semibold">
-              Average Availability Over the Day
-            </h2>
+            <div className="flex items-baseline justify-between gap-4">
+              <h2 className="text-lg font-semibold">
+                Average Availability Over the Day
+              </h2>
+              {hasCapability ? (
+                <span className="text-xs text-slate-400">
+                  Daily averages by fuel for {capDate}
+                  {nextCapDate ? ` and next date ${nextCapDate}` : ""}.
+                </span>
+              ) : null}
+            </div>
+
             <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/60">
               <table className="min-w-full text-sm table-fixed">
                 <colgroup>
-                  <col style={{ width: "50%" }} />
-                  <col style={{ width: "25%" }} />
-                  <col style={{ width: "25%" }} />
+                  <col style={{ width: "40%" }} />
+                  <col style={{ width: "15%" }} />
+                  <col style={{ width: "15%" }} />
+                  <col style={{ width: "15%" }} />
+                  <col style={{ width: "15%" }} />
                 </colgroup>
                 <thead className="bg-slate-900/80 text-xs uppercase tracking-wide text-slate-300">
                   <tr>
                     <th className="px-3 py-2 text-left font-medium">Fuel</th>
                     <th className="px-3 py-2 text-right font-medium">
-                      Avg Availability (%)
+                      Today Avg (%)
                     </th>
                     <th className="px-3 py-2 text-right font-medium">
-                      Avg Available (MW)
+                      Today Avg (MW)
+                    </th>
+                    <th className="px-3 py-2 text-right font-medium">
+                      Next Day Avg (%)
+                    </th>
+                    <th className="px-3 py-2 text-right font-medium">
+                      Next Day Avg (MW)
                     </th>
                   </tr>
                 </thead>
@@ -778,7 +864,7 @@ export default async function CapabilityPage() {
                   {!hasCapability || avgRows.length === 0 ? (
                     <tr>
                       <td
-                        colSpan={3}
+                        colSpan={5}
                         className="px-3 py-4 text-center text-slate-500"
                       >
                         Daily capability statistics will appear here once the
@@ -795,11 +881,23 @@ export default async function CapabilityPage() {
                           {row.fuel}
                         </td>
                         <td className="px-3 py-2 text-right">
-                          {formatNumber(row.pct, 1)}%
+                          {row.pctToday != null
+                            ? `${formatNumber(row.pctToday, 1)}%`
+                            : "—"}
                         </td>
                         <td className="px-3 py-2 text-right">
-                          {row.availableMw != null
-                            ? `${formatNumber(row.availableMw, 1)} MW`
+                          {row.availableMwToday != null
+                            ? `${formatNumber(row.availableMwToday, 1)} MW`
+                            : "—"}
+                        </td>
+                        <td className="px-3 py-2 text-right">
+                          {row.pctNext != null
+                            ? `${formatNumber(row.pctNext, 1)}%`
+                            : "—"}
+                        </td>
+                        <td className="px-3 py-2 text-right">
+                          {row.availableMwNext != null
+                            ? `${formatNumber(row.availableMwNext, 1)} MW`
                             : "—"}
                         </td>
                       </tr>
