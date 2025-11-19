@@ -1,100 +1,18 @@
 // app/page.tsx
+import NavTabs from "./components/NavTabs";
+import { getTodayHourlyStates, summarizeDay } from "../lib/marketData";
 
-type CushionFlag = "tight" | "watch" | "comfortable" | "unknown";
+export const revalidate = 60; // regenerate at most once per minute
 
-type HourlyPoint = {
-  time: string;
-  heLabel: string;
-  poolPrice?: number | null;
-  smp?: number | null;
-  ail?: number | null;
-  availableSupply?: number | null;
-  imports?: number | null;
-  cushionMw?: number | null;
-  cushionPercent?: number | null;
-  cushionFlag: CushionFlag;
-};
-
-export const revalidate = 60; // re-fetch server data at most once per minute
-
-// ---- fallback data builder (same idea as API route) ----
-function classifyCushion(mw?: number | null, ail?: number | null): CushionFlag {
-  if (mw == null || ail == null || ail <= 0) return "unknown";
-  const pct = mw / ail;
-
-  if (pct < 0.06) return "tight";
-  if (pct < 0.12) return "watch";
-  return "comfortable";
-}
-
-function buildFallbackData(): HourlyPoint[] {
-  const base = new Date();
-  base.setMinutes(0, 0, 0);
-
-  const points: HourlyPoint[] = [];
-
-  for (let i = 0; i < 24; i++) {
-    const t = new Date(base);
-    t.setHours(base.getHours() + i);
-
-    const ail = 10_000 + Math.round(1000 * Math.sin((i / 24) * Math.PI * 2));
-    const available = ail + 800 + (i < 6 || i > 20 ? 300 : 0);
-    const cushion = available - ail - 600;
-    const flag = classifyCushion(cushion, ail);
-
-    points.push({
-      time: t.toISOString(),
-      heLabel: `HE ${t.getHours().toString().padStart(2, "0")}`,
-      poolPrice: flag === "tight" ? 250 : flag === "watch" ? 120 : 50,
-      smp: flag === "tight" ? 260 : flag === "watch" ? 130 : 55,
-      ail,
-      availableSupply: available,
-      imports: flag === "tight" ? 500 : 100,
-      cushionMw: cushion,
-      cushionPercent: cushion / ail,
-      cushionFlag: flag,
-    });
-  }
-
-  return points;
-}
-
-// ---- data fetcher with safe fallback ----
-async function fetchSupplyCushion(): Promise<{
-  updatedAt: string;
-  points: HourlyPoint[];
-}> {
-  try {
-    // IMPORTANT: relative URL so Next can call the internal route at build time
-    const res = await fetch("/api/aeso/supply-cushion", {
-      next: { revalidate: 60 },
-    });
-
-    if (!res.ok) {
-      console.error("Supply cushion API returned:", res.status, res.statusText);
-      throw new Error("Non-2xx from API");
-    }
-
-    return res.json();
-  } catch (err) {
-    console.error("Failed to load supply cushion data, using fallback:", err);
-    // Fallback so build & runtime never crash
-    return {
-      updatedAt: new Date().toISOString(),
-      points: buildFallbackData(),
-    };
-  }
-}
-
-function formatNumber(n?: number | null, decimals = 0) {
+function formatNumber(n: number | null | undefined, decimals = 0) {
   if (n == null || Number.isNaN(n)) return "—";
   return n.toLocaleString(undefined, {
-    maximumFractionDigits: decimals,
     minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
   });
 }
 
-function cushionFlagLabel(flag: CushionFlag) {
+function cushionFlagLabel(flag: string | undefined) {
   switch (flag) {
     case "tight":
       return "Tight";
@@ -107,7 +25,7 @@ function cushionFlagLabel(flag: CushionFlag) {
   }
 }
 
-function cushionFlagClass(flag: CushionFlag) {
+function cushionFlagClass(flag: string | undefined) {
   switch (flag) {
     case "tight":
       return "bg-red-500/10 text-red-400 border-red-500/40";
@@ -120,78 +38,73 @@ function cushionFlagClass(flag: CushionFlag) {
   }
 }
 
-export default async function HomePage() {
-  const { updatedAt, points } = await fetchSupplyCushion();
-  const nowPoint = points[0];
-  const next24 = points.slice(0, 24);
+export default async function DashboardPage() {
+  const states = await getTodayHourlyStates();
+  const summary = summarizeDay(states);
+  const now = summary.current;
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100">
       <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
-        {/* Header */}
-        <header className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
-              Alberta Power Supply Cushion
-            </h1>
-            <p className="mt-1 max-w-2xl text-sm text-slate-400">
-              Live view of supply cushion, pool price, load and imports/exports to help you
-              decide when to buy or sell power.
-            </p>
-          </div>
-
-          <div className="flex flex-col items-start gap-1 text-xs text-slate-400 sm:items-end">
-            <span>Last updated: {new Date(updatedAt).toLocaleString()}</span>
-            <span className="rounded-full bg-slate-800 px-3 py-1 text-[11px] font-medium">
-              Prototype — wired for AESO reports &amp; web scraping
-            </span>
-          </div>
+        <header className="mb-4">
+          <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
+            Alberta Power Trader Dashboard
+          </h1>
+          <p className="mt-1 max-w-2xl text-sm text-slate-400">
+            Synthetic v1 wired to a shared market model. Replace{" "}
+            <code className="rounded bg-slate-900 px-1 py-0.5 text-[11px]">
+              lib/marketData.ts
+            </code>{" "}
+            with AESO / CAISO data to go live.
+          </p>
         </header>
 
-        {/* Top metrics */}
+        <NavTabs />
+
+        {/* Top stats */}
         <section className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-          <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4 shadow">
+          <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
             <p className="text-xs uppercase tracking-wide text-slate-400">
               Current Cushion
             </p>
             <p className="mt-2 text-3xl font-semibold">
-              {formatNumber(nowPoint?.cushionMw, 0)}{" "}
+              {formatNumber(now?.cushionMw, 0)}{" "}
               <span className="text-base font-normal text-slate-400">MW</span>
             </p>
             <p className="mt-1 text-xs text-slate-400">
-              {nowPoint?.cushionPercent != null
-                ? `${(nowPoint.cushionPercent * 100).toFixed(1)}% of load`
+              {now
+                ? `${(now.cushionPercent * 100).toFixed(1)}% of load`
                 : "—"}
             </p>
           </div>
 
-          <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4 shadow">
+          <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
             <p className="text-xs uppercase tracking-wide text-slate-400">
-              Pool Price (Forecast / SMP)
+              Price (Pool / SMP)
             </p>
             <p className="mt-2 text-3xl font-semibold">
-              ${formatNumber(nowPoint?.poolPrice, 0)}
+              ${formatNumber(now?.actualPoolPrice, 0)}
             </p>
             <p className="mt-1 text-xs text-slate-400">
-              SMP:{" "}
-              {nowPoint?.smp != null ? `$${formatNumber(nowPoint.smp, 0)}` : "—"}
+              Forecast: ${formatNumber(now?.forecastPoolPrice, 0)} · SMP: $
+              {formatNumber(now?.smp, 0)}
             </p>
           </div>
 
-          <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4 shadow">
+          <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
             <p className="text-xs uppercase tracking-wide text-slate-400">
-              Alberta Internal Load (AIL)
+              Load (AIL)
             </p>
             <p className="mt-2 text-3xl font-semibold">
-              {formatNumber(nowPoint?.ail, 0)}{" "}
+              {formatNumber(now?.actualLoad, 0)}{" "}
               <span className="text-base font-normal text-slate-400">MW</span>
             </p>
             <p className="mt-1 text-xs text-slate-400">
-              Available: {formatNumber(nowPoint?.availableSupply, 0)} MW
+              Forecast: {formatNumber(now?.forecastLoad, 0)} MW
             </p>
           </div>
 
-          <div className="flex flex-col justify-between rounded-2xl border border-slate-800 bg-slate-900/60 p-4 shadow">
+          <div className="flex flex-col justify-between rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
             <div>
               <p className="text-xs uppercase tracking-wide text-slate-400">
                 System Status
@@ -199,31 +112,35 @@ export default async function HomePage() {
               <div
                 className={
                   "mt-2 inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium " +
-                  cushionFlagClass(nowPoint?.cushionFlag ?? "unknown")
+                  cushionFlagClass(now?.cushionFlag)
                 }
               >
                 <span className="inline-block h-2 w-2 rounded-full bg-current" />
-                {cushionFlagLabel(nowPoint?.cushionFlag ?? "unknown")}
+                {cushionFlagLabel(now?.cushionFlag)}
               </div>
             </div>
             <p className="mt-3 text-xs text-slate-400">
-              Imports / exports: {formatNumber(nowPoint?.imports, 0)} MW{" "}
-              <span className="text-slate-500">(positive = importing)</span>
+              Peak load today: {formatNumber(summary.peakLoad, 0)} MW · Max price: $
+              {formatNumber(summary.maxPrice, 0)}
             </p>
           </div>
         </section>
 
-        {/* Hourly table */}
-        <section className="mt-8 rounded-2xl border border-slate-800 bg-slate-900/70 p-4 shadow">
-          <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        {/* Hourly supply cushion table */}
+        <section className="mt-8 rounded-2xl border border-slate-800 bg-slate-900/80 p-4">
+          <div className="mb-3 flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
             <div>
               <h2 className="text-lg font-semibold tracking-tight">
-                Next 24 hours — hourly view
+                Supply Cushion vs Nearest Neighbour
               </h2>
               <p className="text-xs text-slate-400">
-                Each row is an hour ending (HE) with load, price and cushion. Low cushion
-                + high price = tight system and good sell conditions.
+                Each row is an hour ending (HE). Cushion is total available
+                capacity + renewables − AIL. NN columns are synthetic nearest
+                neighbour values from the same model.
               </p>
+            </div>
+            <div className="text-xs text-slate-400">
+              Date: <span className="font-mono">{summary.date}</span>
             </div>
           </div>
 
@@ -231,69 +148,93 @@ export default async function HomePage() {
             <table className="min-w-full text-left text-xs">
               <thead className="bg-slate-900/80 text-[11px] uppercase tracking-wide text-slate-400">
                 <tr>
-                  <th className="px-3 py-2">Hour</th>
+                  <th className="px-3 py-2">HE</th>
                   <th className="px-3 py-2">Time</th>
                   <th className="px-3 py-2">Pool Price</th>
-                  <th className="px-3 py-2">SMP</th>
-                  <th className="px-3 py-2">AIL (MW)</th>
-                  <th className="px-3 py-2">Avail. Supply</th>
+                  <th className="px-3 py-2">NN Price</th>
+                  <th className="px-3 py-2">Δ Price</th>
+                  <th className="px-3 py-2">AIL</th>
+                  <th className="px-3 py-2">NN Load</th>
+                  <th className="px-3 py-2">Δ Load</th>
                   <th className="px-3 py-2">Cushion (MW)</th>
                   <th className="px-3 py-2">Cushion %</th>
-                  <th className="px-3 py-2">Imports (MW)</th>
                   <th className="px-3 py-2">Flag</th>
                 </tr>
               </thead>
               <tbody>
-                {next24.map((pt, idx) => {
-                  const isCurrentHour = idx === 0;
+                {states.map((s) => {
+                  const isCurrent = now && s.he === now.he;
+                  const dPrice = s.actualPoolPrice - s.nnPrice;
+                  const dLoad = s.actualLoad - s.nnLoad;
                   return (
                     <tr
-                      key={pt.time}
+                      key={s.he}
                       className={
                         "border-t border-slate-800/60 " +
-                        (isCurrentHour ? "bg-slate-900/70" : "hover:bg-slate-900/40")
+                        (isCurrent ? "bg-slate-900/70" : "hover:bg-slate-900/40")
                       }
                     >
-                      <td className="px-3 py-2 text-[11px] font-medium text-slate-300">
-                        {pt.heLabel}
+                      <td className="px-3 py-2 text-[11px] font-medium text-slate-200">
+                        HE {s.he.toString().padStart(2, "0")}
                       </td>
                       <td className="px-3 py-2 text-[11px] text-slate-400">
-                        {new Date(pt.time).toLocaleTimeString(undefined, {
+                        {new Date(s.time).toLocaleTimeString(undefined, {
                           hour: "2-digit",
                           minute: "2-digit",
                         })}
                       </td>
                       <td className="px-3 py-2 text-[11px]">
-                        ${formatNumber(pt.poolPrice, 0)}
+                        ${formatNumber(s.actualPoolPrice, 0)}
                       </td>
                       <td className="px-3 py-2 text-[11px] text-slate-300">
-                        {pt.smp != null ? `$${formatNumber(pt.smp, 0)}` : "—"}
+                        ${formatNumber(s.nnPrice, 0)}
+                      </td>
+                      <td
+                        className={
+                          "px-3 py-2 text-[11px] " +
+                          (dPrice > 0
+                            ? "text-emerald-400"
+                            : dPrice < 0
+                            ? "text-red-400"
+                            : "text-slate-300")
+                        }
+                      >
+                        {dPrice >= 0 ? "+" : ""}
+                        {formatNumber(dPrice, 0)}
                       </td>
                       <td className="px-3 py-2 text-[11px] text-slate-300">
-                        {formatNumber(pt.ail, 0)}
+                        {formatNumber(s.actualLoad, 0)}
                       </td>
                       <td className="px-3 py-2 text-[11px] text-slate-300">
-                        {formatNumber(pt.availableSupply, 0)}
+                        {formatNumber(s.nnLoad, 0)}
+                      </td>
+                      <td
+                        className={
+                          "px-3 py-2 text-[11px] " +
+                          (dLoad > 0
+                            ? "text-red-400"
+                            : dLoad < 0
+                            ? "text-emerald-400"
+                            : "text-slate-300")
+                        }
+                      >
+                        {dLoad >= 0 ? "+" : ""}
+                        {formatNumber(dLoad, 0)}
                       </td>
                       <td className="px-3 py-2 text-[11px] text-slate-300">
-                        {formatNumber(pt.cushionMw, 0)}
+                        {formatNumber(s.cushionMw, 0)}
                       </td>
                       <td className="px-3 py-2 text-[11px] text-slate-300">
-                        {pt.cushionPercent != null
-                          ? `${(pt.cushionPercent * 100).toFixed(1)}%`
-                          : "—"}
-                      </td>
-                      <td className="px-3 py-2 text-[11px] text-slate-300">
-                        {formatNumber(pt.imports, 0)}
+                        {(s.cushionPercent * 100).toFixed(1)}%
                       </td>
                       <td className="px-3 py-2 text-[11px]">
                         <span
                           className={
                             "inline-flex rounded-full border px-2 py-0.5 " +
-                            cushionFlagClass(pt.cushionFlag)
+                            cushionFlagClass(s.cushionFlag)
                           }
                         >
-                          {cushionFlagLabel(pt.cushionFlag)}
+                          {cushionFlagLabel(s.cushionFlag)}
                         </span>
                       </td>
                     </tr>
@@ -302,11 +243,6 @@ export default async function HomePage() {
               </tbody>
             </table>
           </div>
-
-          <p className="mt-3 text-[11px] text-slate-500">
-            Roadmap: add separate tabs for wind/solar forecast, intertie ATC, BC/CAISO prices
-            and trade recommendation signals (e.g., “export to BC now”, “import from Mid-C”).
-          </p>
         </section>
       </div>
     </main>
