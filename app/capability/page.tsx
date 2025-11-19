@@ -110,8 +110,7 @@ function isDateLike(s: string): boolean {
 /** Grab all cell texts from a single <tr> using a very loose HTML regex. */
 function extractCellsFromRow(rowHtml: string): string[] {
   const cells: string[] = [];
-  // NOTE: no "s" (dotAll) flag — we use [\\s\\S]*? instead so it works
-  // with ES2017 targets.
+  // No "s" (dotAll) flag so it works with ES2017; use [\s\S]*? instead.
   const cellRegex = /<(td|th)[^>]*>([\s\S]*?)<\/t[dh]>/gi;
   let m: RegExpExecArray | null;
   while ((m = cellRegex.exec(rowHtml)) !== null) {
@@ -125,14 +124,29 @@ function extractCellsFromRow(rowHtml: string): string[] {
   return cells;
 }
 
-/** Extract the first "Hour Ending" header row and build a HE -> column index map. */
+/**
+ * Find the header row that contains "Hour Ending", then – in the same
+ * table – find a nearby row that contains HE numbers 1..24. This
+ * handles both one-row and two-row header layouts.
+ */
 function deriveHeColumnMap(
   rowHtmls: string[]
 ): { heToIndex: Map<number, number>; headerRowIndex: number } | null {
+  // Step 1: locate the first row that mentions "Hour Ending".
+  let hourEndingRowIndex = -1;
   for (let i = 0; i < rowHtmls.length; i++) {
-    const row = rowHtmls[i];
-    if (!/hour\s*ending/i.test(row)) continue;
+    if (/hour\s*ending/i.test(rowHtmls[i])) {
+      hourEndingRowIndex = i;
+      break;
+    }
+  }
+  if (hourEndingRowIndex === -1) return null;
 
+  // Step 2: from that row forward, look at the next few rows (including it)
+  // for a row whose cells are the HE numbers 1..24.
+  const maxSearchIndex = Math.min(rowHtmls.length, hourEndingRowIndex + 4);
+  for (let i = hourEndingRowIndex; i < maxSearchIndex; i++) {
+    const row = rowHtmls[i];
     const cells = extractCellsFromRow(row);
     const heToIndex = new Map<number, number>();
 
@@ -149,16 +163,34 @@ function deriveHeColumnMap(
       return { heToIndex, headerRowIndex: i };
     }
   }
+
   return null;
 }
 
-/** Parse a single HTML table into capability cells. */
+/** Parse the AESO HTML into capability cells. */
 function parseAeso7DayHtml(html: string): {
   cells: Aeso7DayCapabilityCell[];
   debug: Aeso7DayDebug;
 } {
-  const tableMatch = html.match(/<table[^>]*>([\s\S]*?)<\/table>/i);
-  if (!tableMatch) {
+  // There are multiple tables; find the one that actually contains
+  // "Hour Ending" (the main data grid).
+  const tableRegex = /<table[^>]*>([\s\S]*?)<\/table>/gi;
+  let m: RegExpExecArray | null;
+  let chosenInner: string | null = null;
+
+  while ((m = tableRegex.exec(html)) !== null) {
+    const inner = m[1];
+    if (/hour\s*ending/i.test(inner)) {
+      chosenInner = inner;
+      break;
+    }
+    if (chosenInner === null) {
+      // fall back to first table if none contain "Hour Ending"
+      chosenInner = inner;
+    }
+  }
+
+  if (!chosenInner) {
     return {
       cells: [],
       debug: {
@@ -169,13 +201,14 @@ function parseAeso7DayHtml(html: string): {
         dates: [],
         fuels: [],
         sampleRows: [],
-        errorMessage: "No <table> element found in AESO 7-Day HTML",
+        errorMessage: "No <table> element containing 'Hour Ending' found",
       },
     };
   }
 
-  const tableHtml = tableMatch[1];
-  const rowHtmls = tableHtml.split(/<\/tr>/i).filter((r) => r.trim().length);
+  const rowHtmls = chosenInner
+    .split(/<\/tr>/i)
+    .filter((r) => r.trim().length > 0);
 
   const heMeta = deriveHeColumnMap(rowHtmls);
   if (!heMeta) {
@@ -190,7 +223,7 @@ function parseAeso7DayHtml(html: string): {
         fuels: [],
         sampleRows: [],
         errorMessage:
-          'Could not find a header row containing "Hour Ending" with HE 1–24 columns',
+          'Could not find a header row containing "Hour Ending" followed by HE 1–24 columns',
       },
     };
   }
@@ -199,6 +232,7 @@ function parseAeso7DayHtml(html: string): {
   const cellsOut: Aeso7DayCapabilityCell[] = [];
   let currentFuel = "";
 
+  // Start after the header rows.
   for (let i = headerRowIndex + 1; i < rowHtmls.length; i++) {
     const rowHtml = rowHtmls[i];
     const cells = extractCellsFromRow(rowHtml).map((c) =>
@@ -219,8 +253,10 @@ function parseAeso7DayHtml(html: string): {
     }
     if (dateIdx === -1 || !dateIso) continue;
 
-    // Work out the fuel label: usually the cell immediately before the date,
-    // but we carry forward the previous fuel when the row is part of the same block.
+    // Fuel label normally lives in a separate column (rowspan) next to
+    // the date column. We take the cell immediately BEFORE the date
+    // if it is not itself a date; otherwise we carry forward the
+    // previous fuel name.
     let fuel = currentFuel;
     if (dateIdx > 0 && cells[dateIdx - 1] && !isDateLike(cells[dateIdx - 1])) {
       fuel = cells[dateIdx - 1];
@@ -233,9 +269,9 @@ function parseAeso7DayHtml(html: string): {
       if (colIdx >= cells.length) return;
       const raw = cells[colIdx];
       if (!raw) return;
-      const m = raw.match(/(\d+(?:\.\d+)?)/);
-      if (!m) return;
-      const val = Number(m[1]);
+      const numMatch = raw.match(/(\d+(?:\.\d+)?)/);
+      if (!numMatch) return;
+      const val = Number(numMatch[1]);
       if (!Number.isFinite(val)) return;
 
       cellsOut.push({
@@ -397,8 +433,6 @@ export default async function CapabilityPage() {
   const reportDate = summary.date;
 
   // Choose a "current" HE:
-  //  - If WMRQH date matches today's Alberta date, use approx HE.
-  //  - Otherwise, fall back to the HE closest to now, then mid-day.
   let chosenHe: number;
   if (reportDate === todayAbIso) {
     chosenHe = approxHe;
@@ -421,11 +455,9 @@ export default async function CapabilityPage() {
 
   /* ----- Shape 7-Day capability into "current HE" + daily averages ----- */
 
-  // Prefer capability rows for the same date as the WMRQH report.
   let capDate = reportDate;
   let capCellsForDate = capCells.filter((c) => c.date === capDate);
 
-  // If no capability for that date, fall back to the latest date available.
   if (!capCellsForDate.length && capCells.length) {
     const allDates = Array.from(new Set(capCells.map((c) => c.date))).sort();
     capDate = allDates[allDates.length - 1];
@@ -434,14 +466,12 @@ export default async function CapabilityPage() {
 
   const hasCapability = capCellsForDate.length > 0;
 
-  // Current-hour availability by fuel.
   const currentCells = capCellsForDate.filter((c) => c.he === currentHe);
   const currentAvailByFuel: Record<string, number> = {};
   for (const c of currentCells) {
     currentAvailByFuel[c.fuel] = c.availabilityPct;
   }
 
-  // Daily average by fuel across all HEs.
   const dailyAvgAvailByFuel: Record<string, number> = {};
   if (hasCapability) {
     const sums: Record<string, { sum: number; count: number }> = {};
