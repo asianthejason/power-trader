@@ -82,6 +82,34 @@ function priceFromCushionPct(pct: number): number {
   return 50 + (0.2 - Math.min(pct, 0.2)) * 150;
 }
 
+// Split a CSV line that may contain quoted fields with commas.
+function splitCsvLine(line: string): string[] {
+  const result: string[] = [];
+  let current = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+
+    if (ch === '"') {
+      // AESO data doesn't appear to use escaped quotes, so we can just toggle.
+      inQuotes = !inQuotes;
+    } else if (ch === "," && !inQuotes) {
+      result.push(current);
+      current = "";
+    } else {
+      current += ch;
+    }
+  }
+
+  result.push(current);
+  return result;
+}
+
+function stripQuotes(s: string): string {
+  return s.replace(/^"+|"+$/g, "");
+}
+
 /* ---------- Synthetic day builder ---------- */
 
 function buildSyntheticDay(date: Date, variant: "today" | "nearest"): HourlyState[] {
@@ -247,12 +275,6 @@ type AesoActualForecastRow = {
   actualAil: number;
 };
 
-/**
- * Fetches AESO Actual/Forecast WMRQH CSV and returns rows keyed by HE.
- * Uses Date column like "11/18/2025 01" → HE = 1.
- */
-// Replace your existing fetchAesoActualForecastToday with THIS:
-
 async function fetchAesoActualForecastToday(): Promise<AesoActualForecastRow[]> {
   try {
     const url =
@@ -269,36 +291,39 @@ async function fetchAesoActualForecastToday(): Promise<AesoActualForecastRow[]> 
 
     const rows: AesoActualForecastRow[] = [];
 
+    const toNum = (s: string): number => {
+      const cleaned = s.replace(/[$,]/g, "").trim();
+      if (!cleaned) return NaN;
+      const n = parseFloat(cleaned);
+      return Number.isFinite(n) ? n : NaN;
+    };
+
     for (const rawLine of lines) {
       const line = rawLine.trim();
       if (!line) continue;
 
-      const parts = line.split(",");
+      const parts = splitCsvLine(line);
       // We expect at least: Date, FPP, APP, F AIL, A AIL
       if (parts.length < 5) continue;
 
-      const dateField = parts[0].trim();
-      // Match things like "11/18/2025 01" (month/day/year HE)
-      const m = dateField.match(
-        /^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2})$/
-      );
-      if (!m) continue;
+      const dateField = stripQuotes(parts[0].trim());
+
+      // Match "MM/DD/YYYY HH" or "MM/DD/YYYY H"
+      const m = dateField.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2})$/);
+      if (!m) {
+        // not a data row (header, title, blank, etc.)
+        continue;
+      }
 
       const he = parseInt(m[4], 10);
       if (!Number.isFinite(he) || he < 1 || he > 24) continue;
 
-      const toNum = (s: string) => {
-        const cleaned = s.replace(/[$,]/g, "").trim();
-        const n = parseFloat(cleaned);
-        return Number.isFinite(n) ? n : NaN;
-      };
+      const forecastPoolPrice = toNum(stripQuotes(parts[1] ?? ""));
+      const actualPoolPrice = toNum(stripQuotes(parts[2] ?? ""));
+      const forecastAil = toNum(stripQuotes(parts[3] ?? ""));
+      const actualAil = toNum(stripQuotes(parts[4] ?? ""));
 
-      const forecastPoolPrice = toNum(parts[1] ?? "");
-      const actualPoolPrice = toNum(parts[2] ?? "");
-      const forecastAil = toNum(parts[3] ?? "");
-      const actualAil = toNum(parts[4] ?? "");
-
-      // If all of these are NaN, skip the row
+      // If literally everything is NaN, skip
       if (
         !Number.isFinite(forecastPoolPrice) &&
         !Number.isFinite(actualPoolPrice) &&
@@ -325,13 +350,16 @@ async function fetchAesoActualForecastToday(): Promise<AesoActualForecastRow[]> 
       }
     }
 
-    return Array.from(byHe.values()).sort((a, b) => a.he - b.he);
+    const finalRows = Array.from(byHe.values()).sort((a, b) => a.he - b.he);
+    if (finalRows.length === 0) {
+      console.error("AESO parser produced 0 rows from CSV");
+    }
+    return finalRows;
   } catch (err) {
     console.error("Error parsing AESO ActualForecast:", err);
     return [];
   }
 }
-
 
 /* ---------- Public functions used by pages ---------- */
 
