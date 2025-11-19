@@ -406,12 +406,12 @@ export default async function CapabilityPage() {
               </p>
             </div>
             <a
-              href={AESO_7DAY_CAPABILITY_CSV_URL}
+              href="http://ets.aeso.ca/ets_web/ip/Market/Reports/SevenDaysHourlyAvailableCapabilityReportServlet?contentType=html"
               target="_blank"
               rel="noreferrer"
               className="inline-flex items-center justify-center rounded-full border border-sky-500/70 bg-sky-900/40 px-3 py-1.5 text-[11px] font-semibold text-sky-100 hover:bg-sky-800/60"
             >
-              Download 7-Day Capability CSV
+              Open 7-Day Capability AESO Data Page
             </a>
           </div>
         </header>
