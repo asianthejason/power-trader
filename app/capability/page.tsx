@@ -31,6 +31,16 @@ function formatPrice(n: number | null | undefined): string {
   return `$${formatNumber(n, 2)}`;
 }
 
+/** Same Alberta-time helper you use on /load-forecast */
+function approxAlbertaNow() {
+  const nowUtc = new Date();
+  const nowAb = new Date(nowUtc.getTime() - 7 * 60 * 60 * 1000); // UTC-7
+  const isoDate = nowAb.toISOString().slice(0, 10);
+  // HE 01 is 00:00–01:00; approximate from hour.
+  const he = ((nowAb.getHours() + 23) % 24) + 1;
+  return { nowAb, isoDate, he };
+}
+
 /* ------------------------------------------------------------------ */
 /*  AESO 7-Day Hourly Available Capability (CSV) helpers               */
 /* ------------------------------------------------------------------ */
@@ -95,10 +105,8 @@ function toNumOrNull(s: string): number | null {
  * Fetch and parse AESO 7-Day Hourly Available Capability as a generic
  * "availability by fuel" dataset.
  *
- * Assumptions (kept intentionally loose and defensive):
- * - First column is a date+HE field like "MM/DD/YYYY HH".
- * - Remaining columns are numeric availability factors or percentages
- *   by fuel type (e.g., Coal, Dual Fuel, SC, Cogen, CC, Hydro, Wind...).
+ * NOTE: If AESO is temporarily returning an HTML error stub instead of
+ * a full CSV, this will log HTTP 200 but 0 rows and an explanatory message.
  */
 async function fetchAesoCapabilityRows(): Promise<{
   rows: AesoCapabilityRow[];
@@ -164,7 +172,8 @@ async function fetchAesoCapabilityRows(): Promise<{
         lineCount: lines.length,
         parsedRowCount: 0,
         fuels: [],
-        errorMessage: "Not enough lines in AESO capability CSV",
+        errorMessage:
+          "Response from AESO 7-Day Capability report is too short to be a valid CSV (often an HTML error stub).",
       },
     };
   }
@@ -252,7 +261,7 @@ function determineAvailabilityScale(rows: AesoCapabilityRow[]): number {
 /* ---------- main page ---------- */
 
 export default async function CapabilityPage() {
-  const states = await getTodayHourlyStates();
+  const states: HourlyState[] = await getTodayHourlyStates();
 
   // If we couldn't load WMRQH at all, show a graceful message.
   if (!states.length) {
@@ -288,7 +297,23 @@ export default async function CapabilityPage() {
   }
 
   const summary = summarizeDay(states);
-  const current = summary.current ?? states[0];
+  const { isoDate: todayAbIso, he: approxHe } = approxAlbertaNow();
+
+  const reportDate = summary.date;
+
+  // Use Alberta HE when report date matches today; otherwise fall back
+  // to mid-day HE from the dataset.
+  let chosenHe: number;
+  if (reportDate === todayAbIso) {
+    chosenHe = approxHe;
+  } else {
+    chosenHe = states[Math.floor(states.length / 2)].he;
+  }
+
+  const current =
+    states.find((s) => s.he === chosenHe) ||
+    summary.current ||
+    states[0];
 
   const currentHe = current.he;
   const currentLoadActual = current.actualLoad;
@@ -300,7 +325,7 @@ export default async function CapabilityPage() {
   const { rows: capRows, debug: capDebug } = await fetchAesoCapabilityRows();
 
   // Focus on the same report date the WMRQH summary is using.
-  let rowsForDate = capRows.filter((r) => r.date === summary.date);
+  let rowsForDate = capRows.filter((r) => r.date === reportDate);
 
   // If that date isn't in the capability report (e.g. report lag), fall
   // back to the latest date present in the capability dataset.
@@ -367,16 +392,28 @@ export default async function CapabilityPage() {
       <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
         {/* Page header */}
         <header className="mb-4 space-y-2">
-          <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
-            Market Capability (Real AESO Load, Price &amp; Availability)
-          </h1>
-          <p className="max-w-3xl text-sm text-slate-400">
-            This view combines AESO&apos;s Actual/Forecast WMRQH report
-            (load and pool price) with the Seven-Day Hourly Available
-            Capability report. Availability by fuel is shown as delivered
-            by AESO (scaled to percentage where appropriate). No synthetic
-            modelling is used.
-          </p>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-baseline sm:justify-between">
+            <div>
+              <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
+                Market Capability (Real AESO Load, Price &amp; Availability)
+              </h1>
+              <p className="max-w-3xl text-sm text-slate-400">
+                This view combines AESO&apos;s Actual/Forecast WMRQH report
+                (load and pool price) with the Seven-Day Hourly Available
+                Capability report. Availability by fuel is shown as delivered
+                by AESO (scaled to percentage where appropriate). No synthetic
+                modelling is used.
+              </p>
+            </div>
+            <a
+              href={AESO_7DAY_CAPABILITY_CSV_URL}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center justify-center rounded-full border border-sky-500/70 bg-sky-900/40 px-3 py-1.5 text-[11px] font-semibold text-sky-100 hover:bg-sky-800/60"
+            >
+              Download 7-Day Capability CSV
+            </a>
+          </div>
         </header>
 
         {/* Shared nav bar */}
@@ -395,8 +432,8 @@ export default async function CapabilityPage() {
               </div>
               <div className="text-[11px] text-sky-200/80">
                 WMRQH report date:{" "}
-                <span className="font-mono">{summary.date}</span> · Current HE
-                (approx):{" "}
+                <span className="font-mono">{reportDate}</span> · Current HE
+                (approx, Alberta):{" "}
                 <span className="font-mono">
                   HE {formatHe(currentHe)}
                 </span>
@@ -439,7 +476,7 @@ export default async function CapabilityPage() {
               {!capDebug.ok && (
                 <p className="text-[11px] text-amber-200/90">
                   Capability debug: HTTP {capDebug.httpStatus || 0}, rows{" "}
-                  {capDebug.parsedRowCount}.{" "}
+                  {capDebug.parsedRowCount}, lines {capDebug.lineCount}.{" "}
                   {capDebug.errorMessage ? capDebug.errorMessage : null}
                 </p>
               )}
