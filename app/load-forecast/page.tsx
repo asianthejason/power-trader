@@ -105,7 +105,7 @@ export default async function LoadForecastPage() {
             </div>
 
             <a
-              href="/api/aeso/actual-forecast-csv"
+              href="http://ets.aeso.ca/ets_web/ip/Market/Reports/ActualForecastWMRQHReportServlet?contentType=csv"
               target="_blank"
               rel="noreferrer"
               className="inline-flex items-center justify-center rounded-full border border-emerald-500/70 bg-emerald-900/40 px-3 py-1.5 text-[11px] font-semibold text-emerald-100 hover:bg-emerald-800/60"
