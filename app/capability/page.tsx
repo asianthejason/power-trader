@@ -60,7 +60,6 @@ function approxAlbertaNow() {
   return { nowAb, isoDate, he };
 }
 
-
 /* ------------------------------------------------------------------ */
 /*  AESO 7-Day Hourly Available Capability (HTML) parser               */
 /* ------------------------------------------------------------------ */
@@ -144,49 +143,17 @@ function extractCellsFromRow(rowHtml: string): string[] {
 }
 
 /**
- * Find the header row that contains "Hour Ending", then – in the same
- * table – find a nearby row that contains HE numbers 1..24. This
- * handles both one-row and two-row header layouts.
+ * Parse the AESO HTML into capability cells.
+ *
+ * We rely on the visual structure of the 7-day report:
+ *   - For each fuel block and date row:
+ *       [fuel?] [date] [HE1] [HE2] ... [HE24]
+ *
+ * So, once we find a date-like cell in a row, we:
+ *   1) Use the previous cell (if non-date) as the fuel label,
+ *      otherwise carry forward the last fuel label.
+ *   2) Treat the next 24 cells after the date cell as HE1..HE24.
  */
-function deriveHeColumnMap(
-  rowHtmls: string[]
-): { heToIndex: Map<number, number>; headerRowIndex: number } | null {
-  // Step 1: locate the first row that mentions "Hour Ending".
-  let hourEndingRowIndex = -1;
-  for (let i = 0; i < rowHtmls.length; i++) {
-    if (/hour\s*ending/i.test(rowHtmls[i])) {
-      hourEndingRowIndex = i;
-      break;
-    }
-  }
-  if (hourEndingRowIndex === -1) return null;
-
-  // Step 2: from that row forward, look at the next few rows (including it)
-  // for a row whose cells are the HE numbers 1..24.
-  const maxSearchIndex = Math.min(rowHtmls.length, hourEndingRowIndex + 4);
-  for (let i = hourEndingRowIndex; i < maxSearchIndex; i++) {
-    const row = rowHtmls[i];
-    const cells = extractCellsFromRow(row);
-    const heToIndex = new Map<number, number>();
-
-    cells.forEach((cell, idx) => {
-      const m = cell.replace(/\s+/g, "").match(/^(\d{1,2})$/);
-      if (!m) return;
-      const n = Number(m[1]);
-      if (Number.isFinite(n) && n >= 1 && n <= 24) {
-        heToIndex.set(n, idx);
-      }
-    });
-
-    if (heToIndex.size > 0) {
-      return { heToIndex, headerRowIndex: i };
-    }
-  }
-
-  return null;
-}
-
-/** Parse the AESO HTML into capability cells. */
 function parseAeso7DayHtml(html: string): {
   cells: Aeso7DayCapabilityCell[];
   debug: Aeso7DayDebug;
@@ -229,31 +196,10 @@ function parseAeso7DayHtml(html: string): {
     .split(/<\/tr>/i)
     .filter((r) => r.trim().length > 0);
 
-  const heMeta = deriveHeColumnMap(rowHtmls);
-  if (!heMeta) {
-    return {
-      cells: [],
-      debug: {
-        ok: false,
-        httpStatus: 200,
-        bodyLength: html.length,
-        parsedCellCount: 0,
-        dates: [],
-        fuels: [],
-        sampleRows: [],
-        errorMessage:
-          'Could not find a header row containing "Hour Ending" followed by HE 1–24 columns',
-      },
-    };
-  }
-
-  const { heToIndex, headerRowIndex } = heMeta;
   const cellsOut: Aeso7DayCapabilityCell[] = [];
   let currentFuel = "";
 
-  // Start after the header rows.
-  for (let i = headerRowIndex + 1; i < rowHtmls.length; i++) {
-    const rowHtml = rowHtmls[i];
+  for (const rowHtml of rowHtmls) {
     const cells = extractCellsFromRow(rowHtml).map((c) =>
       c.replace(/\s+/g, " ").trim()
     );
@@ -272,10 +218,7 @@ function parseAeso7DayHtml(html: string): {
     }
     if (dateIdx === -1 || !dateIso) continue;
 
-    // Fuel label normally lives in a separate column (rowspan) next to
-    // the date column. We take the cell immediately BEFORE the date
-    // if it is not itself a date; otherwise we carry forward the
-    // previous fuel name.
+    // Fuel label: immediately BEFORE the date, if present and not itself a date.
     let fuel = currentFuel;
     if (dateIdx > 0 && cells[dateIdx - 1] && !isDateLike(cells[dateIdx - 1])) {
       fuel = cells[dateIdx - 1];
@@ -283,23 +226,24 @@ function parseAeso7DayHtml(html: string): {
     }
     if (!fuel) continue;
 
-    // For each HE column, pull the numeric percentage.
-    heToIndex.forEach((colIdx, he) => {
-      if (colIdx >= cells.length) return;
+    // Next 24 cells after the date correspond to HE1..HE24.
+    for (let he = 1; he <= 24; he++) {
+      const colIdx = dateIdx + he;
+      if (colIdx >= cells.length) break;
       const raw = cells[colIdx];
-      if (!raw) return;
+      if (!raw) continue;
       const numMatch = raw.match(/(\d+(?:\.\d+)?)/);
-      if (!numMatch) return;
+      if (!numMatch) continue;
       const val = Number(numMatch[1]);
-      if (!Number.isFinite(val)) return;
+      if (!Number.isFinite(val)) continue;
 
       cellsOut.push({
-        date: dateIso!,
+        date: dateIso,
         he,
         fuel,
         availabilityPct: val,
       });
-    });
+    }
   }
 
   const dates = Array.from(new Set(cellsOut.map((c) => c.date))).sort();
