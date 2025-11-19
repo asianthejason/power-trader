@@ -497,19 +497,42 @@ export default async function CapabilityPage() {
     }
   }
 
-  const sortedCurrentFuels = Object.keys(currentAvailByFuel).sort((a, b) => {
-    const av = currentAvailByFuel[a] ?? 0;
-    const bv = currentAvailByFuel[b] ?? 0;
-    if (bv !== av) return bv - av;
-    return a.localeCompare(b);
+  // Build row objects with available MW and sort by that (desc).
+  type Row = {
+    fuel: string;
+    pct: number;
+    availableMw: number | null;
+  };
+
+  const currentRows: Row[] = Object.keys(currentAvailByFuel).map((fuel) => {
+    const pct = currentAvailByFuel[fuel];
+    const mcMw = getFuelRatedCapacityMw(fuel);
+    const availableMw =
+      mcMw != null && pct != null && !Number.isNaN(pct)
+        ? (mcMw * pct) / 100
+        : null;
+    return { fuel, pct, availableMw };
   });
 
-  const sortedAvgFuels = Object.keys(dailyAvgAvailByFuel).sort((a, b) => {
-    const av = dailyAvgAvailByFuel[a] ?? 0;
-    const bv = dailyAvgAvailByFuel[b] ?? 0;
-    if (bv !== av) return bv - av;
-    return a.localeCompare(b);
+  const avgRows: Row[] = Object.keys(dailyAvgAvailByFuel).map((fuel) => {
+    const pct = dailyAvgAvailByFuel[fuel];
+    const mcMw = getFuelRatedCapacityMw(fuel);
+    const availableMw =
+      mcMw != null && pct != null && !Number.isNaN(pct)
+        ? (mcMw * pct) / 100
+        : null;
+    return { fuel, pct, availableMw };
   });
+
+  const sortByAvailableDesc = (a: Row, b: Row) => {
+    const av = a.availableMw ?? 0;
+    const bv = b.availableMw ?? 0;
+    if (bv !== av) return bv - av;
+    return a.fuel.localeCompare(b.fuel);
+  };
+
+  currentRows.sort(sortByAvailableDesc);
+  avgRows.sort(sortByAvailableDesc);
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100">
@@ -635,7 +658,12 @@ export default async function CapabilityPage() {
             </div>
 
             <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/60">
-              <table className="min-w-full text-sm">
+              <table className="min-w-full text-sm table-fixed">
+                <colgroup>
+                  <col style={{ width: "50%" }} />
+                  <col style={{ width: "25%" }} />
+                  <col style={{ width: "25%" }} />
+                </colgroup>
                 <thead className="bg-slate-900/80 text-xs uppercase tracking-wide text-slate-300">
                   <tr>
                     <th className="px-3 py-2 text-left font-medium">Fuel</th>
@@ -648,7 +676,7 @@ export default async function CapabilityPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {!hasCapability || sortedCurrentFuels.length === 0 ? (
+                  {!hasCapability || currentRows.length === 0 ? (
                     <tr>
                       <td
                         colSpan={3}
@@ -660,35 +688,24 @@ export default async function CapabilityPage() {
                       </td>
                     </tr>
                   ) : (
-                    sortedCurrentFuels.map((fuel) => {
-                      const pct = currentAvailByFuel[fuel];
-                      const mcMw = getFuelRatedCapacityMw(fuel);
-                      const availableMw =
-                        mcMw != null &&
-                        pct != null &&
-                        !Number.isNaN(pct)
-                          ? (mcMw * pct) / 100
-                          : null;
-
-                      return (
-                        <tr
-                          key={fuel}
-                          className="border-t border-slate-800"
-                        >
-                          <td className="px-3 py-2 font-mono text-xs">
-                            {fuel}
-                          </td>
-                          <td className="px-3 py-2 text-right">
-                            {formatNumber(pct, 1)}%
-                          </td>
-                          <td className="px-3 py-2 text-right">
-                            {availableMw != null
-                              ? `${formatNumber(availableMw, 1)} MW`
-                              : "—"}
-                          </td>
-                        </tr>
-                      );
-                    })
+                    currentRows.map(({ fuel, pct, availableMw }) => (
+                      <tr
+                        key={fuel}
+                        className="border-t border-slate-800"
+                      >
+                        <td className="px-3 py-2 font-mono text-xs">
+                          {fuel}
+                        </td>
+                        <td className="px-3 py-2 text-right">
+                          {formatNumber(pct, 1)}%
+                        </td>
+                        <td className="px-3 py-2 text-right">
+                          {availableMw != null
+                            ? `${formatNumber(availableMw, 1)} MW`
+                            : "—"}
+                        </td>
+                      </tr>
+                    ))
                   )}
                 </tbody>
               </table>
@@ -701,20 +718,25 @@ export default async function CapabilityPage() {
               Average Availability Over the Day
             </h2>
             <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/60">
-              <table className="min-w-full text-sm">
+              <table className="min-w-full text-sm table-fixed">
+                <colgroup>
+                  <col style={{ width: "50%" }} />
+                  <col style={{ width: "25%" }} />
+                  <col style={{ width: "25%" }} />
+                </colgroup>
                 <thead className="bg-slate-900/80 text-xs uppercase tracking-wide text-slate-300">
                   <tr>
                     <th className="px-3 py-2 text-left font-medium">Fuel</th>
                     <th className="px-3 py-2 text-right font-medium">
-                      Avg Availability (%)
+                      Availability (%)
                     </th>
                     <th className="px-3 py-2 text-right font-medium">
-                      Avg Available (MW)
+                      Available (MW)
                     </th>
                   </tr>
                 </thead>
                 <tbody>
-                  {!hasCapability || sortedAvgFuels.length === 0 ? (
+                  {!hasCapability || avgRows.length === 0 ? (
                     <tr>
                       <td
                         colSpan={3}
@@ -725,35 +747,24 @@ export default async function CapabilityPage() {
                       </td>
                     </tr>
                   ) : (
-                    sortedAvgFuels.map((fuel) => {
-                      const pct = dailyAvgAvailByFuel[fuel];
-                      const mcMw = getFuelRatedCapacityMw(fuel);
-                      const availableMw =
-                        mcMw != null &&
-                        pct != null &&
-                        !Number.isNaN(pct)
-                          ? (mcMw * pct) / 100
-                          : null;
-
-                      return (
-                        <tr
-                          key={fuel}
-                          className="border-t border-slate-800"
-                        >
-                          <td className="px-3 py-2 font-mono text-xs">
-                            {fuel}
-                          </td>
-                          <td className="px-3 py-2 text-right">
-                            {formatNumber(pct, 1)}%
-                          </td>
-                          <td className="px-3 py-2 text-right">
-                            {availableMw != null
-                              ? `${formatNumber(availableMw, 1)} MW`
-                              : "—"}
-                          </td>
-                        </tr>
-                      );
-                    })
+                    avgRows.map(({ fuel, pct, availableMw }) => (
+                      <tr
+                        key={fuel}
+                        className="border-t border-slate-800"
+                      >
+                        <td className="px-3 py-2 font-mono text-xs">
+                          {fuel}
+                        </td>
+                        <td className="px-3 py-2 text-right">
+                          {formatNumber(pct, 1)}%
+                        </td>
+                        <td className="px-3 py-2 text-right">
+                          {availableMw != null
+                            ? `${formatNumber(availableMw, 1)} MW`
+                            : "—"}
+                        </td>
+                      </tr>
+                    ))
                   )}
                 </tbody>
               </table>
