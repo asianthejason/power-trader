@@ -1,6 +1,7 @@
 // lib/marketData.ts
 
 export type CushionFlag = "tight" | "watch" | "comfortable" | "unknown";
+export type DataSource = "synthetic" | "aeso+synthetic";
 
 export type IntertieSnapshot = {
   path: "AB-BC" | "AB-SK" | "AB-MATL";
@@ -50,6 +51,9 @@ export type HourlyState = {
 
   // Capability breakdown by fuel
   capability: CapabilityByFuel[];
+
+  // Where this row ultimately came from
+  dataSource: DataSource;
 };
 
 export type DailySummary = {
@@ -78,14 +82,13 @@ function priceFromCushionPct(pct: number): number {
   return 50 + (0.2 - Math.min(pct, 0.2)) * 150;
 }
 
-/* ---------- Synthetic day builder (unchanged) ---------- */
+/* ---------- Synthetic day builder ---------- */
 
 function buildSyntheticDay(date: Date, variant: "today" | "nearest"): HourlyState[] {
   const base = new Date(date);
   base.setHours(0, 0, 0, 0);
 
   const fuelTypes = ["SC", "CC", "COGEN", "HYDRO", "WIND", "SOLAR", "OTHER"];
-
   const result: HourlyState[] = [];
 
   for (let he = 1; he <= 24; he++) {
@@ -93,12 +96,10 @@ function buildSyntheticDay(date: Date, variant: "today" | "nearest"): HourlyStat
     t.setHours(he);
 
     const angle = ((he - 1) / 24) * Math.PI * 2;
+
     // Base load shape
-    let loadBase = 9000 + 1800 * Math.sin(angle - Math.PI / 2); // low at night, high late afternoon
-    // Weekend-ish tweak for nearest neighbour
-    if (variant === "nearest") {
-      loadBase *= 0.97;
-    }
+    let loadBase = 9000 + 1800 * Math.sin(angle - Math.PI / 2);
+    if (variant === "nearest") loadBase *= 0.97;
 
     const rand = (seed: number) => {
       const x = Math.sin(seed * 999 + he * 77) * 10000;
@@ -229,6 +230,7 @@ function buildSyntheticDay(date: Date, variant: "today" | "nearest"): HourlyStat
       solarActual: Math.round(solarActual),
       interties,
       capability,
+      dataSource: "synthetic",
     });
   }
 
@@ -247,18 +249,14 @@ type AesoActualForecastRow = {
 
 /**
  * Fetches AESO Actual/Forecast WMRQH CSV and returns rows keyed by HE.
- * This is intentionally defensive: if anything goes wrong, it returns [].
+ * Uses Date column like "11/18/2025 01" → HE = 1.
  */
 async function fetchAesoActualForecastToday(): Promise<AesoActualForecastRow[]> {
   try {
     const url =
-      "http://ets.aeso.ca/ets_web/ip/Market/Reports/ActualForecastWMRQHReportServlet?contentType=csv";
+      "https://ets.aeso.ca/ets_web/ip/Market/Reports/ActualForecastWMRQHReportServlet?contentType=csv";
 
-    const res = await fetch(url, {
-      // We control caching via Next revalidate; here we always fetch fresh.
-      cache: "no-store",
-    });
-
+    const res = await fetch(url, { cache: "no-store" });
     if (!res.ok) {
       console.error("AESO ActualForecast fetch failed:", res.status, res.statusText);
       return [];
@@ -269,23 +267,31 @@ async function fetchAesoActualForecastToday(): Promise<AesoActualForecastRow[]> 
     if (lines.length < 2) return [];
 
     // Find header row (line that contains "Forecast Pool Price")
-    let headerIndex = lines.findIndex((l) =>
+    const headerIndex = lines.findIndex((l) =>
       l.toLowerCase().includes("forecast pool price")
     );
-    if (headerIndex === -1) return [];
+    if (headerIndex === -1) {
+      console.error("AESO header row not found");
+      return [];
+    }
 
     const header = lines[headerIndex].split(",");
-
     const findIndex = (frag: string) =>
       header.findIndex((h) => h.toLowerCase().includes(frag));
 
-    const idxHe = findIndex("he");
+    const idxDate = findIndex("date");
     const idxFp = findIndex("forecast pool");
     const idxAp = findIndex("actual posted pool");
     const idxFa = findIndex("forecast ail");
     const idxAa = findIndex("actual ail");
 
-    if (idxHe === -1 || idxFp === -1 || idxAp === -1 || idxFa === -1 || idxAa === -1) {
+    if (
+      idxDate === -1 ||
+      idxFp === -1 ||
+      idxAp === -1 ||
+      idxFa === -1 ||
+      idxAa === -1
+    ) {
       console.error("AESO header mismatch:", header);
       return [];
     }
@@ -297,12 +303,19 @@ async function fetchAesoActualForecastToday(): Promise<AesoActualForecastRow[]> 
       if (!line || !line.includes(",")) continue;
 
       const parts = line.split(",");
-      const heStr = parts[idxHe]?.trim();
-      const he = parseInt(heStr, 10);
+
+      const dateRaw = parts[idxDate]?.trim();
+      if (!dateRaw) continue;
+
+      // Example: "11/18/2025 01" → hour = "01" → HE 1
+      const pieces = dateRaw.split(/\s+/);
+      if (pieces.length < 2) continue;
+      const hourStr = pieces[1];
+      const he = parseInt(hourStr, 10);
       if (!Number.isFinite(he)) continue;
 
       const toNum = (idx: number) => {
-        const v = parts[idx]?.replace(/[$]/g, "").trim();
+        const v = parts[idx]?.replace(/[$,]/g, "").trim();
         const n = parseFloat(v);
         return Number.isFinite(n) ? n : NaN;
       };
@@ -316,7 +329,6 @@ async function fetchAesoActualForecastToday(): Promise<AesoActualForecastRow[]> 
       });
     }
 
-    // Keep only HE 1..24 and dedupe by HE (first occurrence wins)
     const byHe = new Map<number, AesoActualForecastRow>();
     for (const r of rows) {
       if (r.he >= 1 && r.he <= 24 && !byHe.has(r.he)) byHe.set(r.he, r);
@@ -335,9 +347,7 @@ export async function getTodayHourlyStates(): Promise<HourlyState[]> {
   const now = new Date();
   const synthetic = buildSyntheticDay(now, "today");
 
-  // Try to overlay real AESO hourly load/price
   const realRows = await fetchAesoActualForecastToday();
-
   if (realRows.length === 0) {
     // All synthetic if we couldn't fetch real data
     return synthetic;
@@ -345,9 +355,7 @@ export async function getTodayHourlyStates(): Promise<HourlyState[]> {
 
   const byHe = new Map<number, AesoActualForecastRow>();
   realRows.forEach((r) => {
-    if (r.he >= 1 && r.he <= 24 && !byHe.has(r.he)) {
-      byHe.set(r.he, r);
-    }
+    if (r.he >= 1 && r.he <= 24 && !byHe.has(r.he)) byHe.set(r.he, r);
   });
 
   return synthetic.map((state) => {
@@ -355,6 +363,7 @@ export async function getTodayHourlyStates(): Promise<HourlyState[]> {
     if (!row) return state;
 
     const oldLoad = state.actualLoad;
+
     const actualLoad = Number.isFinite(row.actualAil)
       ? Math.round(row.actualAil)
       : state.actualLoad;
@@ -362,8 +371,7 @@ export async function getTodayHourlyStates(): Promise<HourlyState[]> {
       ? Math.round(row.forecastAil)
       : state.forecastLoad;
 
-    // Adjust cushion to be consistent with new actual load.
-    // We assume total available MW stayed the same and only load changed.
+    // Adjust cushion to be consistent with new actual load
     const deltaLoad = actualLoad - oldLoad;
     const cushionMw = state.cushionMw - deltaLoad;
     const cushionPercent =
@@ -383,6 +391,7 @@ export async function getTodayHourlyStates(): Promise<HourlyState[]> {
       cushionMw,
       cushionPercent,
       cushionFlag,
+      dataSource: "aeso+synthetic",
     };
   });
 }
@@ -390,7 +399,9 @@ export async function getTodayHourlyStates(): Promise<HourlyState[]> {
 export async function getNearestNeighbourStates(): Promise<HourlyState[]> {
   const ref = new Date();
   ref.setDate(ref.getDate() - 14); // pretend NN is two weeks ago
-  return buildSyntheticDay(ref, "nearest");
+  const synthetic = buildSyntheticDay(ref, "nearest");
+  // nearest neighbour stays synthetic for now
+  return synthetic;
 }
 
 export function summarizeDay(states: HourlyState[]): DailySummary {
