@@ -251,10 +251,12 @@ type AesoActualForecastRow = {
  * Fetches AESO Actual/Forecast WMRQH CSV and returns rows keyed by HE.
  * Uses Date column like "11/18/2025 01" → HE = 1.
  */
+// Replace your existing fetchAesoActualForecastToday with THIS:
+
 async function fetchAesoActualForecastToday(): Promise<AesoActualForecastRow[]> {
   try {
     const url =
-      "https://ets.aeso.ca/ets_web/ip/Market/Reports/ActualForecastWMRQHReportServlet?contentType=csv";
+      "http://ets.aeso.ca/ets_web/ip/Market/Reports/ActualForecastWMRQHReportServlet?contentType=csv";
 
     const res = await fetch(url, { cache: "no-store" });
     if (!res.ok) {
@@ -263,75 +265,64 @@ async function fetchAesoActualForecastToday(): Promise<AesoActualForecastRow[]> 
     }
 
     const text = await res.text();
-    const lines = text.split(/\r?\n/).map((l) => l.trim());
-    if (lines.length < 2) return [];
-
-    // Find header row (line that contains "Forecast Pool Price")
-    const headerIndex = lines.findIndex((l) =>
-      l.toLowerCase().includes("forecast pool price")
-    );
-    if (headerIndex === -1) {
-      console.error("AESO header row not found");
-      return [];
-    }
-
-    const header = lines[headerIndex].split(",");
-    const findIndex = (frag: string) =>
-      header.findIndex((h) => h.toLowerCase().includes(frag));
-
-    const idxDate = findIndex("date");
-    const idxFp = findIndex("forecast pool");
-    const idxAp = findIndex("actual posted pool");
-    const idxFa = findIndex("forecast ail");
-    const idxAa = findIndex("actual ail");
-
-    if (
-      idxDate === -1 ||
-      idxFp === -1 ||
-      idxAp === -1 ||
-      idxFa === -1 ||
-      idxAa === -1
-    ) {
-      console.error("AESO header mismatch:", header);
-      return [];
-    }
+    const lines = text.split(/\r?\n/);
 
     const rows: AesoActualForecastRow[] = [];
 
-    for (let i = headerIndex + 1; i < lines.length; i++) {
-      const line = lines[i];
-      if (!line || !line.includes(",")) continue;
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line) continue;
 
       const parts = line.split(",");
+      // We expect at least: Date, FPP, APP, F AIL, A AIL
+      if (parts.length < 5) continue;
 
-      const dateRaw = parts[idxDate]?.trim();
-      if (!dateRaw) continue;
+      const dateField = parts[0].trim();
+      // Match things like "11/18/2025 01" (month/day/year HE)
+      const m = dateField.match(
+        /^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2})$/
+      );
+      if (!m) continue;
 
-      // Example: "11/18/2025 01" → hour = "01" → HE 1
-      const pieces = dateRaw.split(/\s+/);
-      if (pieces.length < 2) continue;
-      const hourStr = pieces[1];
-      const he = parseInt(hourStr, 10);
-      if (!Number.isFinite(he)) continue;
+      const he = parseInt(m[4], 10);
+      if (!Number.isFinite(he) || he < 1 || he > 24) continue;
 
-      const toNum = (idx: number) => {
-        const v = parts[idx]?.replace(/[$,]/g, "").trim();
-        const n = parseFloat(v);
+      const toNum = (s: string) => {
+        const cleaned = s.replace(/[$,]/g, "").trim();
+        const n = parseFloat(cleaned);
         return Number.isFinite(n) ? n : NaN;
       };
 
+      const forecastPoolPrice = toNum(parts[1] ?? "");
+      const actualPoolPrice = toNum(parts[2] ?? "");
+      const forecastAil = toNum(parts[3] ?? "");
+      const actualAil = toNum(parts[4] ?? "");
+
+      // If all of these are NaN, skip the row
+      if (
+        !Number.isFinite(forecastPoolPrice) &&
+        !Number.isFinite(actualPoolPrice) &&
+        !Number.isFinite(forecastAil) &&
+        !Number.isFinite(actualAil)
+      ) {
+        continue;
+      }
+
       rows.push({
         he,
-        forecastPoolPrice: toNum(idxFp),
-        actualPoolPrice: toNum(idxAp),
-        forecastAil: toNum(idxFa),
-        actualAil: toNum(idxAa),
+        forecastPoolPrice,
+        actualPoolPrice,
+        forecastAil,
+        actualAil,
       });
     }
 
+    // Deduplicate by HE (first row wins) and sort 1→24
     const byHe = new Map<number, AesoActualForecastRow>();
     for (const r of rows) {
-      if (r.he >= 1 && r.he <= 24 && !byHe.has(r.he)) byHe.set(r.he, r);
+      if (r.he >= 1 && r.he <= 24 && !byHe.has(r.he)) {
+        byHe.set(r.he, r);
+      }
     }
 
     return Array.from(byHe.values()).sort((a, b) => a.he - b.he);
@@ -340,6 +331,7 @@ async function fetchAesoActualForecastToday(): Promise<AesoActualForecastRow[]> 
     return [];
   }
 }
+
 
 /* ---------- Public functions used by pages ---------- */
 
