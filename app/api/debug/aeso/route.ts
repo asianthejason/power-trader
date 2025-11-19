@@ -1,6 +1,41 @@
 // app/api/debug/aeso/route.ts
 import { NextResponse } from "next/server";
 
+// ---------- Small CSV helpers (same idea as in lib/marketData.ts) ----------
+
+function splitCsvLine(line: string): string[] {
+  const result: string[] = [];
+  let current = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+
+    if (ch === '"') {
+      inQuotes = !inQuotes;
+    } else if (ch === "," && !inQuotes) {
+      result.push(current);
+      current = "";
+    } else {
+      current += ch;
+    }
+  }
+
+  result.push(current);
+  return result;
+}
+
+function stripQuotes(s: string): string {
+  return s.replace(/^"+|"+$/g, "");
+}
+
+function toNum(s: string): number | null {
+  const cleaned = s.replace(/[$,]/g, "").trim();
+  if (!cleaned || cleaned === "-") return null;
+  const n = parseFloat(cleaned);
+  return Number.isFinite(n) ? n : null;
+}
+
 type AesoRow = {
   he: number;
   forecastPoolPrice: number | null;
@@ -9,48 +44,30 @@ type AesoRow = {
   actualAil: number | null;
 };
 
-// VERY lenient parser: do NOT rely on headers, just pattern-match rows.
 function parseAesoCsv(text: string): AesoRow[] {
   const lines = text.split(/\r?\n/);
   const rows: AesoRow[] = [];
-
-  const toNum = (s: string): number | null => {
-    const cleaned = s.replace(/[$,]/g, "").trim();
-    if (!cleaned) return null;
-    const n = parseFloat(cleaned);
-    return Number.isFinite(n) ? n : null;
-  };
 
   for (const rawLine of lines) {
     const line = rawLine.trim();
     if (!line) continue;
 
-    const parts = line.split(",");
+    const parts = splitCsvLine(line);
     if (parts.length < 5) continue;
 
-    const dateField = parts[0].trim();
-
-    // Try a few different date formats we've seen in screenshots:
-    // "11/18/2025 01", "11/18/2025 1:00", maybe quoted, etc.
-    const plain = dateField.replace(/^"+|"+$/g, "");
+    const dateField = stripQuotes(parts[0].trim());
 
     // Match "MM/DD/YYYY HH"
-    let m = plain.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2})$/);
-    if (!m) {
-      // Match "MM/DD/YYYY HH:MM"
-      m = plain.match(
-        /^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})$/
-      );
-    }
+    const m = dateField.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2})$/);
     if (!m) continue;
 
     const he = parseInt(m[4], 10);
     if (!Number.isFinite(he) || he < 1 || he > 24) continue;
 
-    const forecastPoolPrice = toNum(parts[1] ?? "");
-    const actualPoolPrice = toNum(parts[2] ?? "");
-    const forecastAil = toNum(parts[3] ?? "");
-    const actualAil = toNum(parts[4] ?? "");
+    const forecastPoolPrice = toNum(stripQuotes(parts[1] ?? ""));
+    const actualPoolPrice = toNum(stripQuotes(parts[2] ?? ""));
+    const forecastAil = toNum(stripQuotes(parts[3] ?? ""));
+    const actualAil = toNum(stripQuotes(parts[4] ?? ""));
 
     if (
       forecastPoolPrice === null &&
@@ -58,7 +75,6 @@ function parseAesoCsv(text: string): AesoRow[] {
       forecastAil === null &&
       actualAil === null
     ) {
-      // nothing numeric here, probably header or footer
       continue;
     }
 
@@ -74,7 +90,9 @@ function parseAesoCsv(text: string): AesoRow[] {
   return rows;
 }
 
-export const revalidate = 0; // always live
+// ---------- API handler ----------
+
+export const revalidate = 0;
 export const dynamic = "force-dynamic";
 
 export async function GET() {
@@ -86,23 +104,8 @@ export async function GET() {
     const status = res.status;
     const ok = res.ok;
 
-    let body = "";
-    try {
-      body = await res.text();
-    } catch (e) {
-      return NextResponse.json(
-        {
-          ok,
-          status,
-          error: "Failed to read response body",
-          errorDetail: String(e),
-        },
-        { status: 500 }
-      );
-    }
-
+    const body = await res.text();
     const lines = body.split(/\r?\n/);
-
     const parsed = parseAesoCsv(body);
 
     return NextResponse.json(
@@ -110,9 +113,9 @@ export async function GET() {
         ok,
         status,
         lineCount: lines.length,
-        sampleLines: lines.slice(0, 15), // first 15 raw lines of CSV
+        sampleLines: lines.slice(0, 15),
         parsedRowCount: parsed.length,
-        parsedSample: parsed.slice(0, 8), // first 8 parsed rows (HE etc.)
+        parsedSample: parsed.slice(0, 8),
       },
       { status: ok ? 200 : status }
     );

@@ -19,6 +19,9 @@ export default async function LoadForecastPage() {
 
   const nowHe = now?.he ?? 0;
 
+  const aesoRows = states.filter((s) => s.dataSource === "aeso+synthetic").length;
+  const hasAeso = aesoRows > 0;
+
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100">
       <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
@@ -31,6 +34,28 @@ export default async function LoadForecastPage() {
             price; for future hours we show the synthetic forecast. This mirrors
             your Excel &quot;Use Actual&quot; flags.
           </p>
+
+          {/* Data source / debug banner */}
+          <div className="mt-3 inline-flex flex-wrap items-center gap-3 rounded-xl border border-slate-800 bg-slate-900/80 px-3 py-2 text-[11px] text-slate-300">
+            <div className="flex items-center gap-2">
+              <span className="inline-flex h-2 w-2 rounded-full bg-emerald-400" />
+              <span className="font-mono uppercase tracking-wide">
+                Source:
+              </span>
+              <span className="font-mono text-emerald-300">
+                {hasAeso
+                  ? "AESO ActualForecastWMRQH + synthetic model"
+                  : "Synthetic only (no AESO rows for today)"}
+              </span>
+            </div>
+            <div className="h-3 w-px bg-slate-700" />
+            <div className="font-mono text-slate-400">
+              AESO-backed rows today:{" "}
+              <span className="text-slate-100">
+                {aesoRows} / {states.length || 24}
+              </span>
+            </div>
+          </div>
         </header>
 
         <NavTabs />
@@ -42,6 +67,7 @@ export default async function LoadForecastPage() {
               {nowHe ? `HE ${nowHe.toString().padStart(2, "0")}` : "—"}
             </span>
           </div>
+
           <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/40">
             <table className="min-w-full text-left text-xs">
               <thead className="bg-slate-900/80 text-[11px] uppercase tracking-wide text-slate-400">
@@ -59,6 +85,7 @@ export default async function LoadForecastPage() {
                 {states.map((s) => {
                   const useActual = s.he <= nowHe;
                   const useActualPrice = s.he <= nowHe;
+
                   return (
                     <tr
                       key={s.he}
@@ -94,10 +121,12 @@ export default async function LoadForecastPage() {
               </tbody>
             </table>
           </div>
+
           <p className="mt-3 text-[11px] text-slate-500">
-            In your AESO-backed version, this table would be populated from the
-            Actual/Forecast WMRQH report, with logic to bias-correct remaining
-            hours based on realized forecast error so far.
+            When AESO data is available, Forecast/Actual AIL and prices are
+            pulled from the Actual/Forecast WMRQH report and overlaid onto the
+            synthetic curve. The banner above shows how many hours are currently
+            using AESO values.
           </p>
         </section>
       </div>
