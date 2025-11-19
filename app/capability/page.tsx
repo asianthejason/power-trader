@@ -393,6 +393,22 @@ async function fetchAeso7DayCapabilityCells(): Promise<{
 
 /* ---------- main page ---------- */
 
+type AvgRow = {
+  fuel: string;
+  pct: number;
+  availableMw: number | null;
+};
+
+type MultiHourRow = {
+  fuel: string;
+  prevPct: number | null;
+  prevAvailMw: number | null;
+  currPct: number | null;
+  currAvailMw: number | null;
+  nextPct: number | null;
+  nextAvailMw: number | null;
+};
+
 export default async function CapabilityPage() {
   const [{ rows, debug: wmrqhDebug }, states, sevenDay] = await Promise.all([
     fetchAesoActualForecastRows(),
@@ -478,12 +494,6 @@ export default async function CapabilityPage() {
 
   const hasCapability = capCellsForDate.length > 0;
 
-  const currentCells = capCellsForDate.filter((c) => c.he === currentHe);
-  const currentAvailByFuel: Record<string, number> = {};
-  for (const c of currentCells) {
-    currentAvailByFuel[c.fuel] = c.availabilityPct;
-  }
-
   const dailyAvgAvailByFuel: Record<string, number> = {};
   if (hasCapability) {
     const sums: Record<string, { sum: number; count: number }> = {};
@@ -497,24 +507,62 @@ export default async function CapabilityPage() {
     }
   }
 
-  // Build row objects with available MW and sort by that (desc).
-  type Row = {
-    fuel: string;
-    pct: number;
-    availableMw: number | null;
-  };
+  // Build availability maps by HE for the selected date.
+  const availByHe: Record<number, Record<string, number>> = {};
+  for (const c of capCellsForDate) {
+    if (!availByHe[c.he]) availByHe[c.he] = {};
+    availByHe[c.he][c.fuel] = c.availabilityPct;
+  }
 
-  const currentRows: Row[] = Object.keys(currentAvailByFuel).map((fuel) => {
-    const pct = currentAvailByFuel[fuel];
+  const prevHe = currentHe > 1 ? currentHe - 1 : null;
+  const nextHe = currentHe < 24 ? currentHe + 1 : null;
+
+  const prevAvailByFuel =
+    prevHe != null && availByHe[prevHe] ? availByHe[prevHe] : {};
+  const currAvailByFuel = availByHe[currentHe] ?? {};
+  const nextAvailByFuel =
+    nextHe != null && availByHe[nextHe] ? availByHe[nextHe] : {};
+
+  // Multi-hour rows (prev / current / next) sorted by current available MW.
+  const allFuelsSet = new Set<string>([
+    ...Object.keys(prevAvailByFuel),
+    ...Object.keys(currAvailByFuel),
+    ...Object.keys(nextAvailByFuel),
+  ]);
+
+  const multiRows: MultiHourRow[] = [];
+  for (const fuel of allFuelsSet) {
     const mcMw = getFuelRatedCapacityMw(fuel);
-    const availableMw =
-      mcMw != null && pct != null && !Number.isNaN(pct)
-        ? (mcMw * pct) / 100
-        : null;
-    return { fuel, pct, availableMw };
+
+    const prevPctRaw = prevAvailByFuel[fuel];
+    const currPctRaw = currAvailByFuel[fuel];
+    const nextPctRaw = nextAvailByFuel[fuel];
+
+    const mkAvail = (pct?: number): number | null => {
+      if (mcMw == null || pct == null || Number.isNaN(pct)) return null;
+      return (mcMw * pct) / 100;
+    };
+
+    multiRows.push({
+      fuel,
+      prevPct: prevPctRaw ?? null,
+      prevAvailMw: mkAvail(prevPctRaw),
+      currPct: currPctRaw ?? null,
+      currAvailMw: mkAvail(currPctRaw),
+      nextPct: nextPctRaw ?? null,
+      nextAvailMw: mkAvail(nextPctRaw),
+    });
+  }
+
+  multiRows.sort((a, b) => {
+    const av = a.currAvailMw ?? 0;
+    const bv = b.currAvailMw ?? 0;
+    if (bv !== av) return bv - av;
+    return a.fuel.localeCompare(b.fuel);
   });
 
-  const avgRows: Row[] = Object.keys(dailyAvgAvailByFuel).map((fuel) => {
+  // Daily averages rows for the second table.
+  const avgRows: AvgRow[] = Object.keys(dailyAvgAvailByFuel).map((fuel) => {
     const pct = dailyAvgAvailByFuel[fuel];
     const mcMw = getFuelRatedCapacityMw(fuel);
     const availableMw =
@@ -524,15 +572,16 @@ export default async function CapabilityPage() {
     return { fuel, pct, availableMw };
   });
 
-  const sortByAvailableDesc = (a: Row, b: Row) => {
+  avgRows.sort((a, b) => {
     const av = a.availableMw ?? 0;
     const bv = b.availableMw ?? 0;
     if (bv !== av) return bv - av;
     return a.fuel.localeCompare(b.fuel);
-  };
+  });
 
-  currentRows.sort(sortByAvailableDesc);
-  avgRows.sort(sortByAvailableDesc);
+  const prevLabel = prevHe ? `HE ${formatHe(prevHe)}` : "Prev HE";
+  const currLabel = `HE ${formatHe(currentHe)}`;
+  const nextLabel = nextHe ? `HE ${formatHe(nextHe)}` : "Next HE";
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100">
@@ -639,20 +688,21 @@ export default async function CapabilityPage() {
 
         {/* Capability tables */}
         <section className="mt-6 space-y-8">
-          {/* Current hour capability */}
+          {/* Multi-hour capability */}
           <section className="space-y-3">
             <div className="flex items-baseline justify-between gap-4">
               <h2 className="text-lg font-semibold">
-                Current Hour Availability by Fuel (HE {formatHe(currentHe)})
+                Availability by Fuel – Previous, Current, Next Hour
               </h2>
               {hasCapability ? (
                 <span className="text-xs text-slate-400">
                   From AESO 7-Day Hourly Available Capability report, date{" "}
-                  {capDate}.
+                  {capDate}. Current HE {formatHe(currentHe)}; previous/next
+                  show adjacent HE values when available.
                 </span>
               ) : (
                 <span className="text-xs text-amber-300">
-                  No parsed capability rows found for this date/HE yet.
+                  No parsed capability rows found for this date yet.
                 </span>
               )}
             </div>
@@ -660,48 +710,86 @@ export default async function CapabilityPage() {
             <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/60">
               <table className="min-w-full text-sm table-fixed">
                 <colgroup>
-                  <col style={{ width: "50%" }} />
-                  <col style={{ width: "25%" }} />
-                  <col style={{ width: "25%" }} />
+                  <col style={{ width: "28%" }} />
+                  <col style={{ width: "12%" }} />
+                  <col style={{ width: "12%" }} />
+                  <col style={{ width: "12%" }} />
+                  <col style={{ width: "12%" }} />
+                  <col style={{ width: "12%" }} />
+                  <col style={{ width: "12%" }} />
                 </colgroup>
-                <thead className="bg-slate-900/80 text-xs uppercase tracking-wide text-slate-300">
+                <thead className="bg-slate-900/80 text-[11px] uppercase tracking-wide text-slate-300">
                   <tr>
                     <th className="px-3 py-2 text-left font-medium">Fuel</th>
                     <th className="px-3 py-2 text-right font-medium">
-                      Availability (%)
+                      {prevLabel} (%)
                     </th>
                     <th className="px-3 py-2 text-right font-medium">
-                      Available (MW)
+                      {prevLabel} (MW)
+                    </th>
+                    <th className="px-3 py-2 text-right font-medium">
+                      {currLabel} (%)
+                    </th>
+                    <th className="px-3 py-2 text-right font-medium">
+                      {currLabel} (MW)
+                    </th>
+                    <th className="px-3 py-2 text-right font-medium">
+                      {nextLabel} (%)
+                    </th>
+                    <th className="px-3 py-2 text-right font-medium">
+                      {nextLabel} (MW)
                     </th>
                   </tr>
                 </thead>
                 <tbody>
-                  {!hasCapability || currentRows.length === 0 ? (
+                  {!hasCapability || multiRows.length === 0 ? (
                     <tr>
                       <td
-                        colSpan={3}
+                        colSpan={7}
                         className="px-3 py-4 text-center text-slate-500"
                       >
                         Capability data by fuel could not be derived from the
-                        AESO 7-Day report for this date/hour (or no rows were
+                        AESO 7-Day report for this date (or no rows were
                         parsed).
                       </td>
                     </tr>
                   ) : (
-                    currentRows.map(({ fuel, pct, availableMw }) => (
+                    multiRows.map((row) => (
                       <tr
-                        key={fuel}
+                        key={row.fuel}
                         className="border-t border-slate-800"
                       >
                         <td className="px-3 py-2 font-mono text-xs">
-                          {fuel}
+                          {row.fuel}
                         </td>
                         <td className="px-3 py-2 text-right">
-                          {formatNumber(pct, 1)}%
+                          {row.prevPct != null
+                            ? `${formatNumber(row.prevPct, 1)}%`
+                            : "—"}
                         </td>
                         <td className="px-3 py-2 text-right">
-                          {availableMw != null
-                            ? `${formatNumber(availableMw, 1)} MW`
+                          {row.prevAvailMw != null
+                            ? `${formatNumber(row.prevAvailMw, 1)} MW`
+                            : "—"}
+                        </td>
+                        <td className="px-3 py-2 text-right">
+                          {row.currPct != null
+                            ? `${formatNumber(row.currPct, 1)}%`
+                            : "—"}
+                        </td>
+                        <td className="px-3 py-2 text-right">
+                          {row.currAvailMw != null
+                            ? `${formatNumber(row.currAvailMw, 1)} MW`
+                            : "—"}
+                        </td>
+                        <td className="px-3 py-2 text-right">
+                          {row.nextPct != null
+                            ? `${formatNumber(row.nextPct, 1)}%`
+                            : "—"}
+                        </td>
+                        <td className="px-3 py-2 text-right">
+                          {row.nextAvailMw != null
+                            ? `${formatNumber(row.nextAvailMw, 1)} MW`
                             : "—"}
                         </td>
                       </tr>
@@ -728,10 +816,10 @@ export default async function CapabilityPage() {
                   <tr>
                     <th className="px-3 py-2 text-left font-medium">Fuel</th>
                     <th className="px-3 py-2 text-right font-medium">
-                      Availability (%)
+                      Avg Availability (%)
                     </th>
                     <th className="px-3 py-2 text-right font-medium">
-                      Available (MW)
+                      Avg Available (MW)
                     </th>
                   </tr>
                 </thead>
@@ -747,20 +835,20 @@ export default async function CapabilityPage() {
                       </td>
                     </tr>
                   ) : (
-                    avgRows.map(({ fuel, pct, availableMw }) => (
+                    avgRows.map((row) => (
                       <tr
-                        key={fuel}
+                        key={row.fuel}
                         className="border-t border-slate-800"
                       >
                         <td className="px-3 py-2 font-mono text-xs">
-                          {fuel}
+                          {row.fuel}
                         </td>
                         <td className="px-3 py-2 text-right">
-                          {formatNumber(pct, 1)}%
+                          {formatNumber(row.pct, 1)}%
                         </td>
                         <td className="px-3 py-2 text-right">
-                          {availableMw != null
-                            ? `${formatNumber(availableMw, 1)} MW`
+                          {row.availableMw != null
+                            ? `${formatNumber(row.availableMw, 1)} MW`
                             : "—"}
                         </td>
                       </tr>
