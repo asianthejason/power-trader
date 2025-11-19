@@ -110,7 +110,9 @@ function isDateLike(s: string): boolean {
 /** Grab all cell texts from a single <tr> using a very loose HTML regex. */
 function extractCellsFromRow(rowHtml: string): string[] {
   const cells: string[] = [];
-  const cellRegex = /<(td|th)[^>]*>(.*?)<\/t[dh]>/gis;
+  // NOTE: no "s" (dotAll) flag — we use [\\s\\S]*? instead so it works
+  // with ES2017 targets.
+  const cellRegex = /<(td|th)[^>]*>([\s\S]*?)<\/t[dh]>/gi;
   let m: RegExpExecArray | null;
   while ((m = cellRegex.exec(rowHtml)) !== null) {
     const inner = m[2]
@@ -237,7 +239,7 @@ function parseAeso7DayHtml(html: string): {
       if (!Number.isFinite(val)) return;
 
       cellsOut.push({
-        date: dateIso,
+        date: dateIso!,
         he,
         fuel,
         availabilityPct: val,
