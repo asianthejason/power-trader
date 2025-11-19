@@ -289,7 +289,7 @@ async function fetchAesoActualForecastCsv(): Promise<{
   meta: AesoActualForecastMeta;
 }> {
   const url =
-    "http://ets.aeso.ca/ets_web/ip/Market/Reports/ActualForecastWMRQHReportServlet?contentType=csv";
+    "https://ets.aeso.ca/ets_web/ip/Market/Reports/ActualForecastWMRQHReportServlet?contentType=csv";
 
   try {
     const res = await fetch(url, { cache: "no-store" });

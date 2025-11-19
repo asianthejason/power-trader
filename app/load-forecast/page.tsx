@@ -109,13 +109,12 @@ export default async function LoadForecastPage() {
             {/* Download button */}
             <div className="flex flex-col items-end gap-1">
               <a
-                href={AESO_WMRQH_CSV_URL}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center rounded-full border border-emerald-500/70 bg-emerald-500/10 px-3 py-1 text-[11px] font-medium text-emerald-100 hover:bg-emerald-500/20"
-              >
-                Download AESO CSV
-              </a>
+  href="/api/aeso/actual-forecast-csv"
+  className="ml-3 inline-flex items-center rounded-full border border-emerald-400/60 px-3 py-1 text-[11px] font-medium text-emerald-100 hover:bg-emerald-500/10"
+>
+  Download raw AESO CSV
+</a>
+
               <p className="max-w-xs text-right text-[10px] text-emerald-300/80">
                 Opens the original AESO Actual/Forecast WMRQH report in a new
                 tab so you can verify the numbers against this page.
