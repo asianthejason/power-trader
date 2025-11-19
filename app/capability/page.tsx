@@ -504,80 +504,80 @@ export default async function CapabilityPage() {
       <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
         {/* Page header */}
         <header className="mb-4 space-y-2">
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-baseline sm:justify-between">
-            <div>
-              <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
-                Market Capability (Real AESO Load, Price &amp; Availability)
-              </h1>
-              <p className="max-w-3xl text-sm text-slate-400">
-                This view combines AESO&apos;s Actual/Forecast WMRQH report
-                (load and pool price) with the 7-Day Hourly Available
-                Capability report. Availability by fuel is interpreted directly
-                from AESO&apos;s HTML (scaled as percentages). No synthetic
-                modelling is used.
-              </p>
-            </div>
-            <a
-              href={AESO_7DAY_CAPABILITY_HTML_URL}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center justify-center rounded-full border border-sky-500/70 bg-sky-900/40 px-3 py-1.5 text-[11px] font-semibold text-sky-100 hover:bg-sky-800/60"
-            >
-              Open AESO 7-Day Capability (HTML)
-            </a>
-          </div>
+          <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
+            Market Capability (Real AESO Load, Price &amp; Availability)
+          </h1>
+          <p className="max-w-3xl text-sm text-slate-400">
+            This view combines AESO&apos;s Actual/Forecast WMRQH report
+            (load and pool price) with the 7-Day Hourly Available
+            Capability report. Availability by fuel is interpreted directly
+            from AESO&apos;s HTML (scaled as percentages). No synthetic
+            modelling is used.
+          </p>
         </header>
 
         {/* Shared nav bar */}
         <NavTabs />
 
-        {/* Summary banner: WMRQH + 7-Day debug */}
+        {/* Summary banner: WMRQH + compact 7-Day debug, link inside bar */}
         <section className="mt-4 rounded-2xl border border-sky-900 bg-sky-950/40 px-4 py-3 text-xs text-sky-100">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-            {/* Left: WMRQH (load & price) */}
-            <div className="space-y-1">
+          <div className="space-y-2">
+            {/* Top row: source chip + 7-day link button */}
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
               <div className="inline-flex items-center gap-2 rounded-full bg-sky-900/80 px-3 py-1 text-[11px] font-medium">
                 <span className="h-2 w-2 rounded-full bg-sky-400" />
                 <span>SOURCE: AESO ActualForecastWMRQH (load &amp; price)</span>
               </div>
 
-              <div className="text-[11px] text-sky-200/80">
-                WMRQH report date:{" "}
-                <span className="font-mono">{reportDate}</span> · Current HE
-                (approx, Alberta):{" "}
+              <a
+                href={AESO_7DAY_CAPABILITY_HTML_URL}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center justify-center rounded-full border border-sky-500/70 bg-sky-900/40 px-3 py-1.5 text-[11px] font-semibold text-sky-100 hover:bg-sky-800/60"
+              >
+                Open AESO 7-Day Capability (HTML)
+              </a>
+            </div>
+
+            {/* WMRQH date & HE */}
+            <div className="text-[11px] text-sky-200/80">
+              WMRQH report date:{" "}
+              <span className="font-mono">{reportDate}</span> · Current HE
+              (approx, Alberta):{" "}
+              <span className="font-mono">HE {formatHe(currentHe)}</span>
+            </div>
+
+            {/* Current load & price snapshot */}
+            <div className="flex flex-wrap gap-3 text-[11px] text-sky-100/90">
+              <span>
+                AIL (actual):{" "}
                 <span className="font-mono">
-                  HE {formatHe(currentHe)}
+                  {formatNumber(currentLoadActual, 0)} MW
                 </span>
-              </div>
+              </span>
+              <span>
+                AIL (forecast):{" "}
+                <span className="font-mono">
+                  {formatNumber(currentLoadForecast, 0)} MW
+                </span>
+              </span>
+              <span>
+                Pool Price (actual):{" "}
+                <span className="font-mono">
+                  {formatPrice(currentPriceActual)}
+                </span>
+              </span>
+              <span>
+                Pool Price (forecast):{" "}
+                <span className="font-mono">
+                  {formatPrice(currentPriceForecast)}
+                </span>
+              </span>
+            </div>
 
-              <div className="flex flex-wrap gap-3 text-[11px] text-sky-100/90">
-                <span>
-                  AIL (actual):{" "}
-                  <span className="font-mono">
-                    {formatNumber(currentLoadActual, 0)} MW
-                  </span>
-                </span>
-                <span>
-                  AIL (forecast):{" "}
-                  <span className="font-mono">
-                    {formatNumber(currentLoadForecast, 0)} MW
-                  </span>
-                </span>
-                <span>
-                  Pool Price (actual):{" "}
-                  <span className="font-mono">
-                    {formatPrice(currentPriceActual)}
-                  </span>
-                </span>
-                <span>
-                  Pool Price (forecast):{" "}
-                  <span className="font-mono">
-                    {formatPrice(currentPriceForecast)}
-                  </span>
-                </span>
-              </div>
-
-              <div className="mt-1 text-[11px] text-sky-300/80">
+            {/* Compact debug lines */}
+            <div className="mt-1 space-y-1 text-[11px] text-sky-300/80">
+              <p>
                 WMRQH debug: HTTP {wmrqhDebug.httpStatus || 0}, rows{" "}
                 {wmrqhDebug.parsedRowCount}, dates{" "}
                 {wmrqhDebug.reportDates.length
@@ -586,45 +586,18 @@ export default async function CapabilityPage() {
                 {wmrqhDebug.errorMessage
                   ? ` · error: ${wmrqhDebug.errorMessage}`
                   : null}
-              </div>
-            </div>
-
-            {/* Right: 7-Day HTML debug */}
-            <div className="max-w-xs space-y-1 text-[11px] text-sky-200/80">
-              <p>
-                The 7-Day Hourly Available Capability report is published by
-                AESO as an HTML table. This site parses that HTML into a
-                machine-readable format to show availability by fuel below.
-                Use the button above to open the official AESO report in a new
-                tab and cross-check.
               </p>
-              <p className="mt-1 text-[11px] text-sky-100/90">
+              <p>
                 7-Day capability debug: HTTP {capDebug.httpStatus || 0},{" "}
                 body length {capDebug.bodyLength} chars, parsed cells{" "}
                 {capDebug.parsedCellCount}
                 {capDebug.dates.length
                   ? ` · dates: ${capDebug.dates.join(", ")}`
                   : ""}
-                {capDebug.fuels.length
-                  ? ` · fuels: ${capDebug.fuels.slice(0, 6).join(", ")}${
-                      capDebug.fuels.length > 6 ? ", …" : ""
-                    }`
-                  : ""}
                 {capDebug.errorMessage
                   ? ` · error: ${capDebug.errorMessage}`
                   : ""}
               </p>
-              {capDebug.sampleRows.length > 0 && (
-                <p className="mt-1 text-[11px] text-sky-200/80">
-                  Sample parsed rows:
-                  <br />
-                  {capDebug.sampleRows.slice(0, 4).map((r, idx) => (
-                    <span key={idx} className="block font-mono">
-                      {r}
-                    </span>
-                  ))}
-                </p>
-              )}
             </div>
           </div>
         </section>
