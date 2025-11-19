@@ -1,150 +1,234 @@
 // app/capability/page.tsx
-import NavTabs from "../components/NavTabs";
-import { getTodayHourlyStates, summarizeDay } from "../../lib/marketData";
+// or: src/app/capability/page.tsx  (depending on your project layout)
+
+import { Suspense } from "react";
+import {
+  getTodayHourlyStates,
+  summarizeDay,
+  type HourlyState,
+} from "../../lib/marketData";
 
 export const revalidate = 60;
 
-function formatNumber(n: number | null | undefined, decimals = 0) {
-  if (n == null || Number.isNaN(n)) return "—";
-  return n.toLocaleString(undefined, {
-    minimumFractionDigits: decimals,
-    maximumFractionDigits: decimals,
-  });
+function formatHe(he: number): string {
+  return he.toString().padStart(2, "0");
+}
+
+function formatNumber(n: number | null | undefined, decimals = 0): string {
+  if (!Number.isFinite(n ?? NaN)) return "—";
+  return (n as number).toFixed(decimals);
+}
+
+function CapabilityTables({ states }: { states: HourlyState[] }) {
+  const summary = summarizeDay(states);
+
+  // If for some reason summarizeDay couldn't find a current hour,
+  // fall back safely to the first HE in the list.
+  const current = summary.current ?? states[0];
+
+  // We currently do NOT have real capability data wired yet, because the
+  // synthetic model has been removed. So we render empty tables with
+  // a clear "not yet wired" note instead of fake numbers.
+  const currentHe = current?.he ?? 1;
+
+  const currentRow = states.find((s) => s.he === currentHe) ?? states[0];
+
+  const currentCapability = currentRow?.capability ?? [];
+  const allCapabilities = states.flatMap((s) => s.capability ?? []);
+
+  return (
+    <div className="space-y-8">
+      {/* Top summary / header */}
+      <section className="space-y-2">
+        <h1 className="text-2xl font-semibold tracking-tight">
+          Market Capability (Real AESO Data – Capability Pending)
+        </h1>
+        <p className="text-sm text-neutral-400 max-w-3xl">
+          This view is now based only on AESO&apos;s Actual/Forecast WMRQH
+          report for load and pool price. The previous synthetic capability
+          model has been removed. Capability by fuel will be wired to real
+          AESO/ATC/outage feeds (e.g. 7-Day Hourly Available Capability,
+          Supply Adequacy, CSD, etc.) in the next phase.
+        </p>
+        <p className="text-xs text-neutral-500">
+          Report date: <span className="font-mono">{summary.date}</span> ·
+          Current HE (approx):{" "}
+          <span className="font-mono">{formatHe(currentHe)}</span>
+        </p>
+      </section>
+
+      {/* Current hour "shell" table */}
+      <section className="space-y-3">
+        <div className="flex items-baseline justify-between gap-4">
+          <h2 className="text-lg font-semibold">
+            Current Hour Capability (HE {formatHe(currentHe)})
+          </h2>
+          <span className="text-xs text-amber-300">
+            Capability by fuel not yet wired to real AESO sources – shown as
+            empty.
+          </span>
+        </div>
+
+        <div className="overflow-x-auto rounded-lg border border-neutral-800 bg-neutral-950/60">
+          <table className="min-w-full text-sm">
+            <thead className="bg-neutral-900/80 text-neutral-300">
+              <tr>
+                <th className="px-3 py-2 text-left font-medium">Fuel</th>
+                <th className="px-3 py-2 text-right font-medium">
+                  Available (MW)
+                </th>
+                <th className="px-3 py-2 text-right font-medium">
+                  Outage (MW)
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {currentCapability.length === 0 ? (
+                <tr>
+                  <td
+                    colSpan={3}
+                    className="px-3 py-4 text-center text-neutral-500"
+                  >
+                    Capability data by fuel is not yet connected to real AESO
+                    sources.
+                  </td>
+                </tr>
+              ) : (
+                currentCapability.map((row) => (
+                  <tr key={row.fuel} className="border-t border-neutral-800">
+                    <td className="px-3 py-2 font-mono text-xs">
+                      {row.fuel}
+                    </td>
+                    <td className="px-3 py-2 text-right">
+                      {formatNumber(row.availableMw)}
+                    </td>
+                    <td className="px-3 py-2 text-right">
+                      {formatNumber(row.outageMw)}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      {/* Average capability shell table */}
+      <section className="space-y-3">
+        <h2 className="text-lg font-semibold">
+          Average Capability Over the Day
+        </h2>
+        <div className="overflow-x-auto rounded-lg border border-neutral-800 bg-neutral-950/60">
+          <table className="min-w-full text-sm">
+            <thead className="bg-neutral-900/80 text-neutral-300">
+              <tr>
+                <th className="px-3 py-2 text-left font-medium">Fuel</th>
+                <th className="px-3 py-2 text-right font-medium">
+                  Avg Available (MW)
+                </th>
+                <th className="px-3 py-2 text-right font-medium">
+                  Avg Outage (MW)
+                </th>
+                <th className="px-3 py-2 text-right font-medium">Outage %</th>
+              </tr>
+            </thead>
+            <tbody>
+              {allCapabilities.length === 0 ? (
+                <tr>
+                  <td
+                    colSpan={4}
+                    className="px-3 py-4 text-center text-neutral-500"
+                  >
+                    Daily capability statistics will appear here once real
+                    capability feeds are integrated.
+                  </td>
+                </tr>
+              ) : (
+                // This branch won’t be hit until capability is wired.
+                Object.values(
+                  allCapabilities.reduce<Record<string, CapabilityByFuel[]>>(
+                    (acc, row) => {
+                      if (!acc[row.fuel]) acc[row.fuel] = [];
+                      acc[row.fuel].push(row);
+                      return acc;
+                    },
+                    {}
+                  )
+                ).map((rowsForFuel) => {
+                  const fuel = rowsForFuel[0].fuel;
+                  const count = rowsForFuel.length || 1;
+
+                  const sumAvail = rowsForFuel.reduce(
+                    (sum, r) => sum + (r.availableMw ?? 0),
+                    0
+                  );
+                  const sumOut = rowsForFuel.reduce(
+                    (sum, r) => sum + (r.outageMw ?? 0),
+                    0
+                  );
+
+                  const avgAvail = sumAvail / count;
+                  const avgOut = sumOut / count;
+                  const outagePct =
+                    avgAvail + avgOut > 0
+                      ? (avgOut / (avgAvail + avgOut)) * 100
+                      : 0;
+
+                  return (
+                    <tr
+                      key={fuel}
+                      className="border-t border-neutral-800"
+                    >
+                      <td className="px-3 py-2 font-mono text-xs">
+                        {fuel}
+                      </td>
+                      <td className="px-3 py-2 text-right">
+                        {formatNumber(avgAvail)}
+                      </td>
+                      <td className="px-3 py-2 text-right">
+                        {formatNumber(avgOut)}
+                      </td>
+                      <td className="px-3 py-2 text-right">
+                        {formatNumber(outagePct, 1)}%
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  );
 }
 
 export default async function CapabilityPage() {
   const states = await getTodayHourlyStates();
-  const summary = summarizeDay(states);
-  const current = summary.current ?? states[0];
 
-  // Aggregate outage by fuel across the day
-  const fuelMap = new Map<
-    string,
-    { availAvg: number; outAvg: number; samples: number }
-  >();
-
-  states.forEach((s) => {
-    s.capability.forEach((c) => {
-      const entry = fuelMap.get(c.fuel) ?? {
-        availAvg: 0,
-        outAvg: 0,
-        samples: 0,
-      };
-      entry.availAvg += c.availableMw;
-      entry.outAvg += c.outageMw;
-      entry.samples += 1;
-      fuelMap.set(c.fuel, entry);
-    });
-  });
-
-  const fuelRows = Array.from(fuelMap.entries()).map(([fuel, v]) => ({
-    fuel,
-    avail: v.availAvg / v.samples,
-    out: v.outAvg / v.samples,
-  }));
+  if (!states.length) {
+    return (
+      <main className="mx-auto flex max-w-5xl flex-col gap-6 px-4 py-8">
+        <h1 className="text-2xl font-semibold tracking-tight">
+          Market Capability
+        </h1>
+        <p className="text-sm text-neutral-400 max-w-3xl">
+          No AESO WMRQH data is available at build time, so this view cannot
+          show capability yet. Once AESO data is reachable from the server
+          and additional capability feeds are integrated, the tables here
+          will populate with real values.
+        </p>
+      </main>
+    );
+  }
 
   return (
-    <main className="min-h-screen bg-slate-950 text-slate-100">
-      <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
-        <header className="mb-4">
-          <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
-            Market Capability
-          </h1>
-          <p className="mt-1 max-w-2xl text-sm text-slate-400">
-            Synthetic view of available MW and outages by fuel type. In
-            production this would map to AESO&apos;s 7-Day Hourly Available
-            Capability + outage data by resource.
-          </p>
-        </header>
-
-        <NavTabs />
-
-        {/* Current hour breakdown */}
-        <section className="mb-6 rounded-2xl border border-slate-800 bg-slate-900/80 p-4">
-          <h2 className="mb-2 text-sm font-semibold tracking-tight">
-            Current Hour Capability (HE {current.he.toString().padStart(2, "0")})
-          </h2>
-          <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/40">
-            <table className="min-w-full text-left text-xs">
-              <thead className="bg-slate-900/80 text-[11px] uppercase tracking-wide text-slate-400">
-                <tr>
-                  <th className="px-3 py-2">Fuel</th>
-                  <th className="px-3 py-2">Available (MW)</th>
-                  <th className="px-3 py-2">Outage (MW)</th>
-                </tr>
-              </thead>
-              <tbody>
-                {current.capability.map((c) => (
-                  <tr
-                    key={c.fuel}
-                    className="border-t border-slate-800/60 hover:bg-slate-900/40"
-                  >
-                    <td className="px-3 py-2 text-[11px] font-medium text-slate-200">
-                      {c.fuel}
-                    </td>
-                    <td className="px-3 py-2 text-[11px] text-slate-300">
-                      {formatNumber(c.availableMw, 0)}
-                    </td>
-                    <td className="px-3 py-2 text-[11px] text-slate-300">
-                      {formatNumber(c.outageMw, 0)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
-
-        {/* Average over the day */}
-        <section className="rounded-2xl border border-slate-800 bg-slate-900/80 p-4">
-          <h2 className="mb-2 text-sm font-semibold tracking-tight">
-            Average Capability Over the Day
-          </h2>
-          <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/40">
-            <table className="min-w-full text-left text-xs">
-              <thead className="bg-slate-900/80 text-[11px] uppercase tracking-wide text-slate-400">
-                <tr>
-                  <th className="px-3 py-2">Fuel</th>
-                  <th className="px-3 py-2">Avg Available (MW)</th>
-                  <th className="px-3 py-2">Avg Outage (MW)</th>
-                  <th className="px-3 py-2">Outage %</th>
-                </tr>
-              </thead>
-              <tbody>
-                {fuelRows.map((row) => {
-                  const pct = row.avail + row.out === 0
-                    ? 0
-                    : (row.out / (row.avail + row.out)) * 100;
-                  return (
-                    <tr
-                      key={row.fuel}
-                      className="border-t border-slate-800/60 hover:bg-slate-900/40"
-                    >
-                      <td className="px-3 py-2 text-[11px] font-medium text-slate-200">
-                        {row.fuel}
-                      </td>
-                      <td className="px-3 py-2 text-[11px] text-slate-300">
-                        {formatNumber(row.avail, 0)}
-                      </td>
-                      <td className="px-3 py-2 text-[11px] text-slate-300">
-                        {formatNumber(row.out, 0)}
-                      </td>
-                      <td className="px-3 py-2 text-[11px] text-slate-300">
-                        {pct.toFixed(1)}%
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-          <p className="mt-3 text-[11px] text-slate-500">
-            This mirrors the Excel &quot;Total Outage MW&quot; and resource
-            availability sections. In the real implementation, wire this up to
-            AESO&apos;s capability + outage feeds and track multi-day trends.
-          </p>
-        </section>
-      </div>
+    <main className="mx-auto flex max-w-5xl flex-col gap-6 px-4 py-8">
+      <Suspense fallback={null}>
+        <CapabilityTables states={states} />
+      </Suspense>
     </main>
   );
 }
+
+type CapabilityByFuel = import("../../lib/marketData").CapabilityByFuel;
