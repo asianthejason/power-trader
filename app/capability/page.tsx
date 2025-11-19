@@ -6,7 +6,6 @@ import {
   summarizeDay,
   fetchAesoActualForecastRows,
   type HourlyState,
-  type AesoForecastDebug,
 } from "../../lib/marketData";
 
 export const revalidate = 60;
@@ -44,30 +43,237 @@ function approxAlbertaNow() {
 }
 
 /* ------------------------------------------------------------------ */
-/*  AESO 7-Day Hourly Available Capability (HTML) debug helper        */
+/*  AESO 7-Day Hourly Available Capability (HTML) parser               */
 /* ------------------------------------------------------------------ */
 
 /**
- * NOTE: AESO publishes the 7-Day Hourly Available Capability report
- * only as HTML, not CSV. This helper *does not* try to parse it – it just
- * fetches the raw HTML and exposes basic debug info so you can confirm
- * what the Vercel backend is seeing.
- *
- * You can open exactly the same HTML in your browser with the button
- * on the page.
+ * Public HTML URL for the 7-Day Hourly Available Capability report.
+ * This is intentionally HTTP (not HTTPS) – the HTTPS endpoint often
+ * requires a client certificate.
  */
 const AESO_7DAY_CAPABILITY_HTML_URL =
   "http://ets.aeso.ca/ets_web/ip/Market/Reports/SevenDaysHourlyAvailableCapabilityReportServlet?contentType=html";
+
+type Aeso7DayCapabilityCell = {
+  date: string; // YYYY-MM-DD
+  he: number; // 1..24
+  fuel: string;
+  availabilityPct: number; // already in %, e.g. 76.3
+};
 
 type Aeso7DayDebug = {
   ok: boolean;
   httpStatus: number;
   bodyLength: number;
+  parsedCellCount: number;
+  dates: string[];
+  fuels: string[];
+  sampleRows: string[];
   errorMessage?: string;
 };
 
-async function fetchAeso7DayCapabilityHtmlDebug(): Promise<Aeso7DayDebug> {
+/** Parse "19-Nov-25" -> "2025-11-19" */
+function parseShortDateToIso(s: string): string | null {
+  const m = s.trim().match(/^(\d{1,2})-([A-Za-z]{3})-(\d{2})$/);
+  if (!m) return null;
+  const day = Number(m[1]);
+  const monStr = m[2].toLowerCase();
+  const yy = Number(m[3]);
+
+  const monthMap: Record<string, number> = {
+    jan: 1,
+    feb: 2,
+    mar: 3,
+    apr: 4,
+    may: 5,
+    jun: 6,
+    jul: 7,
+    aug: 8,
+    sep: 9,
+    oct: 10,
+    nov: 11,
+    dec: 12,
+  };
+  const month = monthMap[monStr];
+  if (!month || !day || !Number.isFinite(yy)) return null;
+
+  const year = 2000 + yy;
+  const mm = month.toString().padStart(2, "0");
+  const dd = day.toString().padStart(2, "0");
+  return `${year}-${mm}-${dd}`;
+}
+
+function isDateLike(s: string): boolean {
+  return parseShortDateToIso(s) !== null;
+}
+
+/** Grab all cell texts from a single <tr> using a very loose HTML regex. */
+function extractCellsFromRow(rowHtml: string): string[] {
+  const cells: string[] = [];
+  const cellRegex = /<(td|th)[^>]*>(.*?)<\/t[dh]>/gis;
+  let m: RegExpExecArray | null;
+  while ((m = cellRegex.exec(rowHtml)) !== null) {
+    const inner = m[2]
+      .replace(/<br\s*\/?>/gi, " ")
+      .replace(/&nbsp;/gi, " ")
+      .replace(/<[^>]*>/g, "")
+      .trim();
+    cells.push(inner);
+  }
+  return cells;
+}
+
+/** Extract the first "Hour Ending" header row and build a HE -> column index map. */
+function deriveHeColumnMap(
+  rowHtmls: string[]
+): { heToIndex: Map<number, number>; headerRowIndex: number } | null {
+  for (let i = 0; i < rowHtmls.length; i++) {
+    const row = rowHtmls[i];
+    if (!/hour\s*ending/i.test(row)) continue;
+
+    const cells = extractCellsFromRow(row);
+    const heToIndex = new Map<number, number>();
+
+    cells.forEach((cell, idx) => {
+      const m = cell.replace(/\s+/g, "").match(/^(\d{1,2})$/);
+      if (!m) return;
+      const n = Number(m[1]);
+      if (Number.isFinite(n) && n >= 1 && n <= 24) {
+        heToIndex.set(n, idx);
+      }
+    });
+
+    if (heToIndex.size > 0) {
+      return { heToIndex, headerRowIndex: i };
+    }
+  }
+  return null;
+}
+
+/** Parse a single HTML table into capability cells. */
+function parseAeso7DayHtml(html: string): {
+  cells: Aeso7DayCapabilityCell[];
+  debug: Aeso7DayDebug;
+} {
+  const tableMatch = html.match(/<table[^>]*>([\s\S]*?)<\/table>/i);
+  if (!tableMatch) {
+    return {
+      cells: [],
+      debug: {
+        ok: false,
+        httpStatus: 200,
+        bodyLength: html.length,
+        parsedCellCount: 0,
+        dates: [],
+        fuels: [],
+        sampleRows: [],
+        errorMessage: "No <table> element found in AESO 7-Day HTML",
+      },
+    };
+  }
+
+  const tableHtml = tableMatch[1];
+  const rowHtmls = tableHtml.split(/<\/tr>/i).filter((r) => r.trim().length);
+
+  const heMeta = deriveHeColumnMap(rowHtmls);
+  if (!heMeta) {
+    return {
+      cells: [],
+      debug: {
+        ok: false,
+        httpStatus: 200,
+        bodyLength: html.length,
+        parsedCellCount: 0,
+        dates: [],
+        fuels: [],
+        sampleRows: [],
+        errorMessage:
+          'Could not find a header row containing "Hour Ending" with HE 1–24 columns',
+      },
+    };
+  }
+
+  const { heToIndex, headerRowIndex } = heMeta;
+  const cellsOut: Aeso7DayCapabilityCell[] = [];
+  let currentFuel = "";
+
+  for (let i = headerRowIndex + 1; i < rowHtmls.length; i++) {
+    const rowHtml = rowHtmls[i];
+    const cells = extractCellsFromRow(rowHtml).map((c) =>
+      c.replace(/\s+/g, " ").trim()
+    );
+    if (!cells.length) continue;
+
+    // Find a date-like cell in this row.
+    let dateIdx = -1;
+    let dateIso: string | null = null;
+    for (let idx = 0; idx < cells.length; idx++) {
+      const iso = parseShortDateToIso(cells[idx]);
+      if (iso) {
+        dateIdx = idx;
+        dateIso = iso;
+        break;
+      }
+    }
+    if (dateIdx === -1 || !dateIso) continue;
+
+    // Work out the fuel label: usually the cell immediately before the date,
+    // but we carry forward the previous fuel when the row is part of the same block.
+    let fuel = currentFuel;
+    if (dateIdx > 0 && cells[dateIdx - 1] && !isDateLike(cells[dateIdx - 1])) {
+      fuel = cells[dateIdx - 1];
+      currentFuel = fuel;
+    }
+    if (!fuel) continue;
+
+    // For each HE column, pull the numeric percentage.
+    heToIndex.forEach((colIdx, he) => {
+      if (colIdx >= cells.length) return;
+      const raw = cells[colIdx];
+      if (!raw) return;
+      const m = raw.match(/(\d+(?:\.\d+)?)/);
+      if (!m) return;
+      const val = Number(m[1]);
+      if (!Number.isFinite(val)) return;
+
+      cellsOut.push({
+        date: dateIso,
+        he,
+        fuel,
+        availabilityPct: val,
+      });
+    });
+  }
+
+  const dates = Array.from(new Set(cellsOut.map((c) => c.date))).sort();
+  const fuels = Array.from(new Set(cellsOut.map((c) => c.fuel))).sort();
+  const sampleRows = cellsOut.slice(0, 12).map((c) => {
+    return `${c.date} HE${formatHe(c.he)} ${c.fuel}: ${c.availabilityPct.toFixed(
+      1
+    )}%`;
+  });
+
+  return {
+    cells: cellsOut,
+    debug: {
+      ok: cellsOut.length > 0,
+      httpStatus: 200,
+      bodyLength: html.length,
+      parsedCellCount: cellsOut.length,
+      dates,
+      fuels,
+      sampleRows,
+    },
+  };
+}
+
+/** Fetch the AESO 7-Day HTML and parse it into cells + debug info. */
+async function fetchAeso7DayCapabilityCells(): Promise<{
+  cells: Aeso7DayCapabilityCell[];
+  debug: Aeso7DayDebug;
+}> {
   let httpStatus = 0;
+  let text: string | null = null;
 
   try {
     const res = await fetch(AESO_7DAY_CAPABILITY_HTML_URL, {
@@ -77,43 +283,74 @@ async function fetchAeso7DayCapabilityHtmlDebug(): Promise<Aeso7DayDebug> {
 
     if (!res.ok) {
       return {
-        ok: false,
-        httpStatus,
-        bodyLength: 0,
-        errorMessage: `HTTP ${res.status} ${res.statusText}`,
+        cells: [],
+        debug: {
+          ok: false,
+          httpStatus,
+          bodyLength: 0,
+          parsedCellCount: 0,
+          dates: [],
+          fuels: [],
+          sampleRows: [],
+          errorMessage: `HTTP ${res.status} ${res.statusText}`,
+        },
       };
     }
 
-    const text = await res.text();
-    return {
-      ok: true,
-      httpStatus,
-      bodyLength: text.length,
-    };
+    text = await res.text();
   } catch (err: any) {
     return {
-      ok: false,
-      httpStatus,
-      bodyLength: 0,
-      errorMessage: String(err?.message ?? err),
+      cells: [],
+      debug: {
+        ok: false,
+        httpStatus,
+        bodyLength: 0,
+        parsedCellCount: 0,
+        dates: [],
+        fuels: [],
+        sampleRows: [],
+        errorMessage: String(err?.message ?? err),
+      },
     };
   }
+
+  if (!text) {
+    return {
+      cells: [],
+      debug: {
+        ok: false,
+        httpStatus,
+        bodyLength: 0,
+        parsedCellCount: 0,
+        dates: [],
+        fuels: [],
+        sampleRows: [],
+        errorMessage: "Empty response body from AESO 7-Day Capability HTML",
+      },
+    };
+  }
+
+  const parsed = parseAeso7DayHtml(text);
+  return {
+    cells: parsed.cells,
+    debug: {
+      ...parsed.debug,
+      httpStatus,
+      bodyLength: text.length,
+    },
+  };
 }
 
 /* ---------- main page ---------- */
 
 export default async function CapabilityPage() {
-  // Pull today’s hourly states (pure WMRQH data, no synthetic),
-  // WMRQH debug info, and a simple 7-Day HTML debug in parallel.
-  const [
-    states,
-    { debug: wmrqhDebug },
-    sevenDayDebug,
-  ] = await Promise.all([
-    getTodayHourlyStates() as Promise<HourlyState[]>,
+  const [{ rows, debug: wmrqhDebug }, states, sevenDay] = await Promise.all([
     fetchAesoActualForecastRows(),
-    fetchAeso7DayCapabilityHtmlDebug(),
+    getTodayHourlyStates() as Promise<HourlyState[]>,
+    fetchAeso7DayCapabilityCells(),
   ]);
+
+  const { cells: capCells, debug: capDebug } = sevenDay;
 
   // If we couldn't load WMRQH at all, show a graceful message.
   if (!states.length) {
@@ -155,14 +392,16 @@ export default async function CapabilityPage() {
 
   const summary = summarizeDay(states);
   const { isoDate: todayAbIso, he: approxHe } = approxAlbertaNow();
-
   const reportDate = summary.date;
 
-  // Use Alberta HE when report date matches today; otherwise fall back
-  // to a mid-day HE from the dataset.
+  // Choose a "current" HE:
+  //  - If WMRQH date matches today's Alberta date, use approx HE.
+  //  - Otherwise, fall back to the HE closest to now, then mid-day.
   let chosenHe: number;
   if (reportDate === todayAbIso) {
     chosenHe = approxHe;
+  } else if (summary.current) {
+    chosenHe = summary.current.he;
   } else {
     chosenHe = states[Math.floor(states.length / 2)].he;
   }
@@ -178,7 +417,55 @@ export default async function CapabilityPage() {
   const currentPriceActual = current.actualPoolPrice;
   const currentPriceForecast = current.forecastPoolPrice;
 
-  const has7Day = sevenDayDebug.ok;
+  /* ----- Shape 7-Day capability into "current HE" + daily averages ----- */
+
+  // Prefer capability rows for the same date as the WMRQH report.
+  let capDate = reportDate;
+  let capCellsForDate = capCells.filter((c) => c.date === capDate);
+
+  // If no capability for that date, fall back to the latest date available.
+  if (!capCellsForDate.length && capCells.length) {
+    const allDates = Array.from(new Set(capCells.map((c) => c.date))).sort();
+    capDate = allDates[allDates.length - 1];
+    capCellsForDate = capCells.filter((c) => c.date === capDate);
+  }
+
+  const hasCapability = capCellsForDate.length > 0;
+
+  // Current-hour availability by fuel.
+  const currentCells = capCellsForDate.filter((c) => c.he === currentHe);
+  const currentAvailByFuel: Record<string, number> = {};
+  for (const c of currentCells) {
+    currentAvailByFuel[c.fuel] = c.availabilityPct;
+  }
+
+  // Daily average by fuel across all HEs.
+  const dailyAvgAvailByFuel: Record<string, number> = {};
+  if (hasCapability) {
+    const sums: Record<string, { sum: number; count: number }> = {};
+    for (const c of capCellsForDate) {
+      if (!sums[c.fuel]) sums[c.fuel] = { sum: 0, count: 0 };
+      sums[c.fuel].sum += c.availabilityPct;
+      sums[c.fuel].count += 1;
+    }
+    for (const [fuel, { sum, count }] of Object.entries(sums)) {
+      dailyAvgAvailByFuel[fuel] = sum / Math.max(count, 1);
+    }
+  }
+
+  const sortedCurrentFuels = Object.keys(currentAvailByFuel).sort((a, b) => {
+    const av = currentAvailByFuel[a] ?? 0;
+    const bv = currentAvailByFuel[b] ?? 0;
+    if (bv !== av) return bv - av;
+    return a.localeCompare(b);
+  });
+
+  const sortedAvgFuels = Object.keys(dailyAvgAvailByFuel).sort((a, b) => {
+    const av = dailyAvgAvailByFuel[a] ?? 0;
+    const bv = dailyAvgAvailByFuel[b] ?? 0;
+    if (bv !== av) return bv - av;
+    return a.localeCompare(b);
+  });
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100">
@@ -188,18 +475,16 @@ export default async function CapabilityPage() {
           <div className="flex flex-col gap-2 sm:flex-row sm:items-baseline sm:justify-between">
             <div>
               <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
-                Market Capability (Real AESO Load &amp; Price – Capability
-                Pending)
+                Market Capability (Real AESO Load, Price &amp; Availability)
               </h1>
               <p className="max-w-3xl text-sm text-slate-400">
-                This view now uses AESO&apos;s Actual/Forecast WMRQH report
-                for load and pool price. Availability by fuel will come from
-                AESO&apos;s 7-Day Hourly Available Capability report
-                (HTML) in a later phase once a robust HTML parser / ETL
-                is in place. No synthetic modelling is used here.
+                This view combines AESO&apos;s Actual/Forecast WMRQH report
+                (load and pool price) with the 7-Day Hourly Available
+                Capability report. Availability by fuel is interpreted directly
+                from AESO&apos;s HTML (scaled as percentages). No synthetic
+                modelling is used.
               </p>
             </div>
-
             <a
               href={AESO_7DAY_CAPABILITY_HTML_URL}
               target="_blank"
@@ -276,24 +561,43 @@ export default async function CapabilityPage() {
             <div className="max-w-xs space-y-1 text-[11px] text-sky-200/80">
               <p>
                 The 7-Day Hourly Available Capability report is published by
-                AESO only in HTML format. To keep this backend simple and
-                robust, we are not yet parsing that HTML into a machine-readable
-                feed. Use the button above to open the official AESO report in
-                a new tab and compare directly.
+                AESO as an HTML table. This site parses that HTML into a
+                machine-readable format to show availability by fuel below.
+                Use the button above to open the official AESO report in a new
+                tab and cross-check.
               </p>
               <p className="mt-1 text-[11px] text-sky-100/90">
-                7-Day capability debug: HTTP {sevenDayDebug.httpStatus || 0},{" "}
-                body length {sevenDayDebug.bodyLength} chars
-                {sevenDayDebug.errorMessage
-                  ? ` · error: ${sevenDayDebug.errorMessage}`
+                7-Day capability debug: HTTP {capDebug.httpStatus || 0},{" "}
+                body length {capDebug.bodyLength} chars, parsed cells{" "}
+                {capDebug.parsedCellCount}
+                {capDebug.dates.length
+                  ? ` · dates: ${capDebug.dates.join(", ")}`
                   : ""}
-                .
+                {capDebug.fuels.length
+                  ? ` · fuels: ${capDebug.fuels.slice(0, 6).join(", ")}${
+                      capDebug.fuels.length > 6 ? ", …" : ""
+                    }`
+                  : ""}
+                {capDebug.errorMessage
+                  ? ` · error: ${capDebug.errorMessage}`
+                  : ""}
               </p>
+              {capDebug.sampleRows.length > 0 && (
+                <p className="mt-1 text-[11px] text-sky-200/80">
+                  Sample parsed rows:
+                  <br />
+                  {capDebug.sampleRows.slice(0, 4).map((r, idx) => (
+                    <span key={idx} className="block font-mono">
+                      {r}
+                    </span>
+                  ))}
+                </p>
+              )}
             </div>
           </div>
         </section>
 
-        {/* Capability tables – explicitly marked as “pending” */}
+        {/* Capability tables */}
         <section className="mt-6 space-y-8">
           {/* Current hour capability */}
           <section className="space-y-3">
@@ -301,10 +605,16 @@ export default async function CapabilityPage() {
               <h2 className="text-lg font-semibold">
                 Current Hour Availability by Fuel (HE {formatHe(currentHe)})
               </h2>
-              <span className="text-xs text-amber-300">
-                Availability by fuel has not yet been wired to the AESO 7-Day
-                report – shown as empty.
-              </span>
+              {hasCapability ? (
+                <span className="text-xs text-slate-400">
+                  From AESO 7-Day Hourly Available Capability report, date{" "}
+                  {capDate}.
+                </span>
+              ) : (
+                <span className="text-xs text-amber-300">
+                  No parsed capability rows found for this date/HE yet.
+                </span>
+              )}
             </div>
 
             <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/60">
@@ -318,16 +628,32 @@ export default async function CapabilityPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  <tr>
-                    <td
-                      colSpan={2}
-                      className="px-3 py-4 text-center text-slate-500"
-                    >
-                      Capability data by fuel will appear here once the AESO
-                      7-Day Hourly Available Capability HTML is parsed and
-                      integrated.
-                    </td>
-                  </tr>
+                  {!hasCapability || sortedCurrentFuels.length === 0 ? (
+                    <tr>
+                      <td
+                        colSpan={2}
+                        className="px-3 py-4 text-center text-slate-500"
+                      >
+                        Capability data by fuel could not be derived from the
+                        AESO 7-Day report for this date/hour (or no rows were
+                        parsed).
+                      </td>
+                    </tr>
+                  ) : (
+                    sortedCurrentFuels.map((fuel) => (
+                      <tr
+                        key={fuel}
+                        className="border-t border-slate-800"
+                      >
+                        <td className="px-3 py-2 font-mono text-xs">
+                          {fuel}
+                        </td>
+                        <td className="px-3 py-2 text-right">
+                          {formatNumber(currentAvailByFuel[fuel], 1)}%
+                        </td>
+                      </tr>
+                    ))
+                  )}
                 </tbody>
               </table>
             </div>
@@ -349,16 +675,31 @@ export default async function CapabilityPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  <tr>
-                    <td
-                      colSpan={2}
-                      className="px-3 py-4 text-center text-slate-500"
-                    >
-                      Daily capability statistics will appear here once the AESO
-                      7-Day report is ingested into a machine-readable format
-                      for this date.
-                    </td>
-                  </tr>
+                  {!hasCapability || sortedAvgFuels.length === 0 ? (
+                    <tr>
+                      <td
+                        colSpan={2}
+                        className="px-3 py-4 text-center text-slate-500"
+                      >
+                        Daily capability statistics will appear here once the
+                        AESO 7-Day report is successfully parsed for this date.
+                      </td>
+                    </tr>
+                  ) : (
+                    sortedAvgFuels.map((fuel) => (
+                      <tr
+                        key={fuel}
+                        className="border-t border-slate-800"
+                      >
+                        <td className="px-3 py-2 font-mono text-xs">
+                          {fuel}
+                        </td>
+                        <td className="px-3 py-2 text-right">
+                          {formatNumber(dailyAvgAvailByFuel[fuel], 1)}%
+                        </td>
+                      </tr>
+                    ))
+                  )}
                 </tbody>
               </table>
             </div>
