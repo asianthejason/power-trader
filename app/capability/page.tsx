@@ -47,12 +47,19 @@ function getFuelRatedCapacityMw(label: string): number | null {
 /** Same Alberta-time helper as /load-forecast */
 function approxAlbertaNow() {
   const nowUtc = new Date();
-  const nowAb = new Date(nowUtc.getTime() - 7 * 60 * 60 * 1000); // UTC-7
+
+  // Rough Alberta local time; AESO reports are in local "hour ending" time.
+  // (This assumes UTC-7; you can later improve this to handle DST.)
+  const nowAb = new Date(nowUtc.getTime() - 7 * 60 * 60 * 1000);
+
   const isoDate = nowAb.toISOString().slice(0, 10);
-  // HE 01 is 00:00–01:00; approximate from hour.
-  const he = ((nowAb.getHours() + 23) % 24) + 1;
+
+  // AESO "hour ending": at 18:44 we are in HE 19, etc.
+  const he = nowAb.getHours() + 1; // 0..23 -> HE 1..24
+
   return { nowAb, isoDate, he };
 }
+
 
 /* ------------------------------------------------------------------ */
 /*  AESO 7-Day Hourly Available Capability (HTML) parser               */
