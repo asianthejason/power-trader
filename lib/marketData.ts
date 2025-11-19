@@ -1,9 +1,10 @@
-// lib/marketData.ts
-
 /* ===================== Shared types ===================== */
 
 export type CushionFlag = "tight" | "watch" | "comfortable" | "unknown";
-export type DataSource = "synthetic" | "aeso+synthetic";
+
+// Keep old literals for now so other parts of the app don't break,
+// but new code will use only "aeso".
+export type DataSource = "synthetic" | "aeso+synthetic" | "aeso";
 
 export type IntertieSnapshot = {
   path: "AB-BC" | "AB-SK" | "AB-MATL";
@@ -24,34 +25,34 @@ export type HourlyState = {
   date: string; // YYYY-MM-DD
   he: number; // 1..24
 
-  // Prices
+  // Prices (from AESO where available)
   forecastPoolPrice: number;
   actualPoolPrice: number;
-  smp: number;
+  smp: number; // currently not populated from real data yet
 
-  // Load
+  // Load (from AESO where available)
   forecastLoad: number;
   actualLoad: number;
 
-  // Nearest neighbour “reference”
+  // Nearest neighbour “reference” (not wired yet, placeholder only)
   nnPrice: number;
   nnLoad: number;
 
-  // Supply cushion (derived)
+  // Supply cushion (not wired yet; derived once we have real capability)
   cushionMw: number;
   cushionPercent: number;
   cushionFlag: CushionFlag;
 
-  // Renewables
+  // Renewables (not wired yet)
   windForecast: number;
   windActual: number;
   solarForecast: number;
   solarActual: number;
 
-  // Interties
+  // Interties (not wired yet)
   interties: IntertieSnapshot[];
 
-  // Capability breakdown by fuel
+  // Capability breakdown by fuel (not wired yet)
   capability: CapabilityByFuel[];
 
   // Where this row ultimately came from
@@ -68,7 +69,7 @@ export type DailySummary = {
 };
 
 /* ------------------------------------------------------------------ */
-/*  Synthetic model helpers (used by dashboard, nearest neighbour, etc)
+/*  Cushion helpers (kept for when we have real supply/capability)    */
 /* ------------------------------------------------------------------ */
 
 function classifyCushion(pct: number): CushionFlag {
@@ -78,171 +79,8 @@ function classifyCushion(pct: number): CushionFlag {
   return "comfortable";
 }
 
-function priceFromCushionPct(pct: number): number {
-  // Very rough synthetic price curve just for demo
-  if (pct < 0.03) return 800 + (0.03 - pct) * 8000;
-  if (pct < 0.06) return 400 + (0.06 - pct) * 4000;
-  if (pct < 0.12) return 120 + (0.12 - pct) * 800;
-  return 50 + (0.2 - Math.min(pct, 0.2)) * 150;
-}
-
-/* ---------- Synthetic day builder ---------- */
-
-function buildSyntheticDay(date: Date, variant: "today" | "nearest"): HourlyState[] {
-  const base = new Date(date);
-  base.setHours(0, 0, 0, 0);
-
-  const fuelTypes = ["SC", "CC", "COGEN", "HYDRO", "WIND", "SOLAR", "OTHER"];
-  const result: HourlyState[] = [];
-
-  for (let he = 1; he <= 24; he++) {
-    const t = new Date(base);
-    t.setHours(he);
-
-    const angle = ((he - 1) / 24) * Math.PI * 2;
-
-    // Base load shape
-    let loadBase = 9000 + 1800 * Math.sin(angle - Math.PI / 2);
-    if (variant === "nearest") loadBase *= 0.97;
-
-    const rand = (seed: number) => {
-      const x = Math.sin(seed * 999 + he * 77) * 10000;
-      return x - Math.floor(x);
-    };
-
-    const forecastLoad = loadBase * (1 + (rand(1) - 0.5) * 0.02);
-    const actualLoad =
-      variant === "today"
-        ? forecastLoad * (1 + (rand(2) - 0.5) * 0.04)
-        : forecastLoad;
-
-    // Renewables
-    const windForecast = 800 + 400 * Math.sin(angle - Math.PI / 3);
-    const windActual =
-      variant === "today"
-        ? windForecast * (1 + (rand(3) - 0.5) * 0.2)
-        : windForecast;
-
-    const solarShape = Math.max(0, Math.sin(angle - Math.PI / 2));
-    const solarForecast = 600 * solarShape;
-    const solarActual =
-      variant === "today"
-        ? solarForecast * (1 + (rand(4) - 0.5) * 0.15)
-        : solarForecast;
-
-    // Total available capability (rough)
-    const baseAvail = actualLoad * 1.12 + 500;
-    const outageFactor = 0.04 + 0.02 * rand(5);
-    const outageMw = baseAvail * outageFactor;
-    const totalAvailable = baseAvail - outageMw + windActual + solarActual;
-
-    const cushionMw = totalAvailable - actualLoad;
-    const cushionPct = cushionMw / actualLoad;
-    const cushionFlag = classifyCushion(cushionPct);
-
-    const price = priceFromCushionPct(cushionPct);
-    const smp = price * (0.9 + 0.2 * rand(6));
-    const forecastPrice =
-      price * (variant === "today" ? 0.95 + 0.1 * rand(7) : 0.9 + 0.1 * rand(7));
-
-    // Interties (AB-BC, AB-SK, AB-MATL)
-    const tightFactor = Math.max(0, 0.12 - cushionPct);
-    const bcImportCap = 800;
-    const skImportCap = 250;
-    const matlImportCap = 300;
-
-    const bcSched = 200 + tightFactor * 400;
-    const skSched = 50 + tightFactor * 150;
-    const matlSched = 80 + tightFactor * 180;
-
-    const interties: IntertieSnapshot[] = [
-      {
-        path: "AB-BC",
-        importCap: bcImportCap,
-        exportCap: 800,
-        scheduled: bcSched,
-        actualFlow: bcSched * (0.95 + 0.1 * rand(8)),
-      },
-      {
-        path: "AB-SK",
-        importCap: skImportCap,
-        exportCap: 250,
-        scheduled: skSched,
-        actualFlow: skSched * (0.95 + 0.1 * rand(9)),
-      },
-      {
-        path: "AB-MATL",
-        importCap: matlImportCap,
-        exportCap: 300,
-        scheduled: matlSched,
-        actualFlow: matlSched * (0.95 + 0.1 * rand(10)),
-      },
-    ];
-
-    // Capability by fuel
-    const capability: CapabilityByFuel[] = [];
-    let remainingAvail = totalAvailable;
-    let remainingOut = outageMw;
-
-    fuelTypes.forEach((fuel, idx) => {
-      const share =
-        idx === fuelTypes.length - 1
-          ? 1
-          : 0.1 + 0.15 * rand(20 + idx);
-
-      const fuelAvail =
-        idx === fuelTypes.length - 1 ? remainingAvail : totalAvailable * share;
-      const fuelOut =
-        idx === fuelTypes.length - 1 ? remainingOut : outageMw * share;
-
-      remainingAvail -= fuelAvail;
-      remainingOut -= fuelOut;
-
-      capability.push({
-        fuel,
-        availableMw: Math.max(0, Math.round(fuelAvail)),
-        outageMw: Math.max(0, Math.round(fuelOut)),
-      });
-    });
-
-    const iso = t.toISOString().slice(0, 19);
-    const dateStr = iso.slice(0, 10);
-
-    result.push({
-      time: iso,
-      date: dateStr,
-      he,
-      forecastPoolPrice: Math.round(forecastPrice),
-      actualPoolPrice: Math.round(price),
-      smp: Math.round(smp),
-      forecastLoad: Math.round(forecastLoad),
-      actualLoad: Math.round(actualLoad),
-      nnPrice:
-        variant === "today"
-          ? Math.round(price * (0.9 + 0.1 * rand(11)))
-          : Math.round(price),
-      nnLoad:
-        variant === "today"
-          ? Math.round(actualLoad * (0.96 + 0.03 * rand(12)))
-          : Math.round(actualLoad),
-      cushionMw: Math.round(cushionMw),
-      cushionPercent: cushionPct,
-      cushionFlag,
-      windForecast: Math.round(windForecast),
-      windActual: Math.round(windActual),
-      solarForecast: Math.round(solarForecast),
-      solarActual: Math.round(solarActual),
-      interties,
-      capability,
-      dataSource: "synthetic",
-    });
-  }
-
-  return result;
-}
-
 /* ------------------------------------------------------------------ */
-/*  AESO Actual / Forecast WMRQH CSV helpers (for load-forecast page) */
+/*  AESO Actual / Forecast WMRQH CSV helpers                          */
 /* ------------------------------------------------------------------ */
 
 export const AESO_ACTUAL_FORECAST_CSV_URL =
@@ -416,82 +254,116 @@ export async function fetchAesoActualForecastRows(): Promise<{
 }
 
 /* ------------------------------------------------------------------ */
-/*  Public functions used by the rest of the site (synthetic model)   */
+/*  Public functions used by the rest of the site                     */
 /* ------------------------------------------------------------------ */
 
 /**
- * Dashboard-style “today” view.
- * Still primarily synthetic, but if AESO data is available for **today**
- * we overlay the real load/price onto the synthetic cushion model.
+ * Convert a set of AESO rows for a single report date into HourlyState[]
+ * with **no synthetic modelling**.
+ *
+ * Fields we do not yet have real data for are filled with neutral placeholders
+ * (0 / empty arrays / "unknown") and will be wired to real sources later.
  */
-export async function getTodayHourlyStates(): Promise<HourlyState[]> {
-  const now = new Date();
-  const synthetic = buildSyntheticDay(now, "today");
+function rowsToHourlyStates(rows: AesoActualForecastRow[]): HourlyState[] {
+  if (!rows.length) return [];
 
-  // Approximate Alberta date (UTC-7). Good enough for lab/demo.
-  const nowAb = new Date(now.getTime() - 7 * 60 * 60 * 1000);
-  const todayAbIso = nowAb.toISOString().slice(0, 10);
+  const dateIso = rows[0].date;
 
-  const { rows } = await fetchAesoActualForecastRows();
-  if (!rows.length) {
-    return synthetic;
-  }
+  // Sort by HE just to be safe
+  const sorted = [...rows].sort((a, b) => a.he - b.he);
 
-  const todaysRows = rows.filter((r) => r.date === todayAbIso);
-  if (!todaysRows.length) {
-    return synthetic;
-  }
+  return sorted.map((r) => {
+    const [year, month, day] = r.date.split("-").map((x) => Number(x));
+    // Interpret HE as "hour ending" in local time; we model it as the
+    // clock time at the end of the hour (01:00 for HE1, .., 24:00 → next day 00:00).
+    const heHour = r.he;
+    const dt = new Date(year, month - 1, day, heHour);
+    const iso = dt.toISOString().slice(0, 19);
 
-  const byHe = new Map<number, AesoActualForecastRow>();
-  for (const r of todaysRows) {
-    if (r.he >= 1 && r.he <= 24 && !byHe.has(r.he)) {
-      byHe.set(r.he, r);
-    }
-  }
+    const forecastLoad = r.forecastAil ?? 0;
+    const actualLoad = r.actualAil ?? 0;
+    const forecastPrice = r.forecastPoolPrice ?? 0;
+    const actualPrice = r.actualPoolPrice ?? 0;
 
-  return synthetic.map((state) => {
-    const row = byHe.get(state.he);
-    if (!row) return state;
-
-    const oldLoad = state.actualLoad;
-
-    const actualLoad =
-      row.actualAil != null ? Math.round(row.actualAil) : state.actualLoad;
-    const forecastLoad =
-      row.forecastAil != null ? Math.round(row.forecastAil) : state.forecastLoad;
-
-    const deltaLoad = actualLoad - oldLoad;
-    const cushionMw = state.cushionMw - deltaLoad;
-    const cushionPercent =
-      actualLoad > 0 ? cushionMw / actualLoad : state.cushionPercent;
-    const cushionFlag = classifyCushion(cushionPercent);
+    // Cushion and other fields will be wired up once we have:
+    // - Supply Adequacy / capability feeds
+    // - Intertie ATC / schedules
+    // - Wind/solar forecasts and actuals
+    const cushionMw = 0;
+    const cushionPercent = 0;
+    const cushionFlag: CushionFlag = "unknown";
 
     return {
-      ...state,
-      forecastPoolPrice:
-        row.forecastPoolPrice != null
-          ? Number(row.forecastPoolPrice.toFixed(2))
-          : state.forecastPoolPrice,
-      actualPoolPrice:
-        row.actualPoolPrice != null
-          ? Number(row.actualPoolPrice.toFixed(2))
-          : state.actualPoolPrice,
+      time: iso,
+      date: dateIso,
+      he: r.he,
+
+      forecastPoolPrice: forecastPrice,
+      actualPoolPrice: actualPrice,
+      smp: 0, // to be wired from CSMPrice or similar
+
       forecastLoad,
       actualLoad,
+
+      nnPrice: 0,
+      nnLoad: 0,
+
       cushionMw,
       cushionPercent,
       cushionFlag,
-      dataSource: "aeso+synthetic",
+
+      windForecast: 0,
+      windActual: 0,
+      solarForecast: 0,
+      solarActual: 0,
+
+      interties: [],
+      capability: [],
+
+      dataSource: "aeso",
     };
   });
 }
 
+/**
+ * Dashboard-style “today” view built **only from AESO WMRQH**.
+ *
+ * - No synthetic fallback.
+ * - If today's Alberta date is not present in the CSV, we fall back to the
+ *   latest report date available from AESO.
+ */
+export async function getTodayHourlyStates(): Promise<HourlyState[]> {
+  const { rows } = await fetchAesoActualForecastRows();
+  if (!rows.length) return [];
+
+  // Approximate Alberta date (UTC-7). Good enough for now.
+  const now = new Date();
+  const nowAb = new Date(now.getTime() - 7 * 60 * 60 * 1000);
+  const todayAbIso = nowAb.toISOString().slice(0, 10);
+
+  const todaysRows = rows.filter((r) => r.date === todayAbIso);
+
+  if (todaysRows.length > 0) {
+    return rowsToHourlyStates(todaysRows);
+  }
+
+  // If today's date is not present, use the latest report date available.
+  const allDates = Array.from(new Set(rows.map((r) => r.date))).sort();
+  const latestDate = allDates[allDates.length - 1];
+  const latestRows = rows.filter((r) => r.date === latestDate);
+
+  return rowsToHourlyStates(latestRows);
+}
+
+/**
+ * Nearest neighbour states.
+ *
+ * For now, this returns the same AESO-based states as today. Once we have
+ * a proper historical data pipeline (CSD, Supply Adequacy, etc.), this will
+ * be replaced with a real nearest-neighbour selection.
+ */
 export async function getNearestNeighbourStates(): Promise<HourlyState[]> {
-  const ref = new Date();
-  ref.setDate(ref.getDate() - 14); // pretend NN is two weeks ago
-  const synthetic = buildSyntheticDay(ref, "nearest");
-  // nearest neighbour stays synthetic for now
-  return synthetic;
+  return getTodayHourlyStates();
 }
 
 export function summarizeDay(states: HourlyState[]): DailySummary {
@@ -533,6 +405,6 @@ export function summarizeDay(states: HourlyState[]): DailySummary {
     peakLoad,
     maxPrice,
     minCushion,
-    avgCushionPct: sumCushionPct / states.length,
+    avgCushionPct: states.length ? sumCushionPct / states.length : 0,
   };
 }
