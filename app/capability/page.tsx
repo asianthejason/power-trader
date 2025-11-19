@@ -31,18 +31,222 @@ function formatPrice(n: number | null | undefined): string {
   return `$${formatNumber(n, 2)}`;
 }
 
-/* ---------- capability helpers (for when real data exists) ---------- */
+/* ------------------------------------------------------------------ */
+/*  AESO 7-Day Hourly Available Capability (CSV) helpers               */
+/* ------------------------------------------------------------------ */
 
-type CapabilityByFuel = import("../../lib/marketData").CapabilityByFuel;
+const AESO_7DAY_CAPABILITY_CSV_URL =
+  "http://ets.aeso.ca/ets_web/ip/Market/Reports/SevenDaysHourlyAvailableCapabilityReportServlet?contentType=csv";
 
-type CapabilityBuckets = Record<string, CapabilityByFuel[]>;
+type AesoCapabilityRow = {
+  date: string; // YYYY-MM-DD
+  he: number; // 1..24
+  values: Record<string, number>; // fuel -> availability factor or %
+};
 
-function bucketByFuel(rows: CapabilityByFuel[]): CapabilityBuckets {
-  return rows.reduce<CapabilityBuckets>((acc, row) => {
-    if (!acc[row.fuel]) acc[row.fuel] = [];
-    acc[row.fuel].push(row);
-    return acc;
-  }, {});
+type AesoCapabilityDebug = {
+  ok: boolean;
+  httpStatus: number;
+  lineCount: number;
+  parsedRowCount: number;
+  fuels: string[];
+  errorMessage?: string;
+};
+
+// Parse "11/19/2025 01" -> { dateIso: "2025-11-19", he: 1 }
+function parseMdyHe(field: string): { dateIso: string; he: number } | null {
+  const m = field.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2})$/);
+  if (!m) return null;
+  const month = Number(m[1]);
+  const day = Number(m[2]);
+  const year = Number(m[3]);
+  const he = Number(m[4]);
+  if (!Number.isFinite(he) || he < 1 || he > 24) return null;
+
+  const mm = month.toString().padStart(2, "0");
+  const dd = day.toString().padStart(2, "0");
+  const dateIso = `${year}-${mm}-${dd}`;
+  return { dateIso, he };
+}
+
+// Very simple CSV extractor for fully-quoted fields (AESO style)
+function csvToFields(line: string): string[] {
+  const fields: string[] = [];
+  const re = /"([^"]*)"/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(line)) !== null) {
+    fields.push(m[1]);
+  }
+  // Fallback if nothing was quoted (just in case)
+  if (!fields.length) {
+    return line.split(",").map((s) => s.trim());
+  }
+  return fields;
+}
+
+function toNumOrNull(s: string): number | null {
+  const cleaned = s.replace(/[$,%]/g, "").trim();
+  if (!cleaned || cleaned === "-" || cleaned === "--") return null;
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Fetch and parse AESO 7-Day Hourly Available Capability as a generic
+ * "availability by fuel" dataset.
+ *
+ * Assumptions (kept intentionally loose and defensive):
+ * - First column is a date+HE field like "MM/DD/YYYY HH".
+ * - Remaining columns are numeric availability factors or percentages
+ *   by fuel type (e.g., Coal, Dual Fuel, SC, Cogen, CC, Hydro, Wind...).
+ */
+async function fetchAesoCapabilityRows(): Promise<{
+  rows: AesoCapabilityRow[];
+  debug: AesoCapabilityDebug;
+}> {
+  let httpStatus = 0;
+  let text: string | null = null;
+
+  try {
+    const res = await fetch(AESO_7DAY_CAPABILITY_CSV_URL, {
+      cache: "no-store",
+    });
+    httpStatus = res.status;
+    if (!res.ok) {
+      return {
+        rows: [],
+        debug: {
+          ok: false,
+          httpStatus,
+          lineCount: 0,
+          parsedRowCount: 0,
+          fuels: [],
+          errorMessage: `HTTP ${res.status} ${res.statusText}`,
+        },
+      };
+    }
+    text = await res.text();
+  } catch (err: any) {
+    return {
+      rows: [],
+      debug: {
+        ok: false,
+        httpStatus,
+        lineCount: 0,
+        parsedRowCount: 0,
+        fuels: [],
+        errorMessage: String(err?.message ?? err),
+      },
+    };
+  }
+
+  if (!text) {
+    return {
+      rows: [],
+      debug: {
+        ok: false,
+        httpStatus,
+        lineCount: 0,
+        parsedRowCount: 0,
+        fuels: [],
+        errorMessage: "Empty response from AESO 7-Day Capability report",
+      },
+    };
+  }
+
+  const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
+  if (lines.length < 2) {
+    return {
+      rows: [],
+      debug: {
+        ok: false,
+        httpStatus,
+        lineCount: lines.length,
+        parsedRowCount: 0,
+        fuels: [],
+        errorMessage: "Not enough lines in AESO capability CSV",
+      },
+    };
+  }
+
+  const header = csvToFields(lines[0]);
+  // All columns after the first date/HE column are treated as fuels,
+  // except any that clearly look like extra labels.
+  const fuelColumns: { index: number; fuel: string }[] = [];
+
+  header.forEach((name, idx) => {
+    if (idx === 0) return;
+    const label = name.trim();
+    if (!label) return;
+    if (/^he\b/i.test(label)) return;
+    if (/date/i.test(label)) return;
+    fuelColumns.push({ index: idx, fuel: label });
+  });
+
+  const rows: AesoCapabilityRow[] = [];
+
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line.startsWith('"')) continue; // skip non-data lines
+
+    const fields = csvToFields(line);
+    if (!fields.length || !fields[0]) continue;
+
+    const dt = parseMdyHe(fields[0]);
+    if (!dt) continue;
+
+    const { dateIso, he } = dt;
+    const values: Record<string, number> = {};
+
+    for (const col of fuelColumns) {
+      const raw = toNumOrNull(fields[col.index] ?? "");
+      if (raw != null) {
+        values[col.fuel] = raw;
+      }
+    }
+
+    if (Object.keys(values).length === 0) continue;
+
+    rows.push({
+      date: dateIso,
+      he,
+      values,
+    });
+  }
+
+  const fuelsSet = new Set<string>();
+  rows.forEach((r) => {
+    Object.keys(r.values).forEach((f) => fuelsSet.add(f));
+  });
+
+  return {
+    rows,
+    debug: {
+      ok: rows.length > 0,
+      httpStatus,
+      lineCount: lines.length,
+      parsedRowCount: rows.length,
+      fuels: Array.from(fuelsSet).sort(),
+    },
+  };
+}
+
+/**
+ * Determine whether the availability numbers look like fractions (0–1)
+ * or percentages (0–100), and return a scale factor to convert them
+ * to a displayable percentage.
+ */
+function determineAvailabilityScale(rows: AesoCapabilityRow[]): number {
+  let maxVal = 0;
+  for (const r of rows) {
+    for (const v of Object.values(r.values)) {
+      if (v > maxVal) maxVal = v;
+    }
+  }
+  if (maxVal === 0) return 1;
+  // If everything is <= 1.5, assume 0–1 fraction and scale by 100.
+  if (maxVal <= 1.5) return 100;
+  return 1; // assume already in percent
 }
 
 /* ---------- main page ---------- */
@@ -75,7 +279,7 @@ export default async function CapabilityPage() {
             <p className="mt-1 text-[11px] text-slate-400">
               Once the AESO report is reachable again, this page will show
               the latest load &amp; price from WMRQH and capability by fuel
-              as we wire in additional feeds.
+              from the AESO 7-Day Hourly Available Capability report.
             </p>
           </section>
         </div>
@@ -92,9 +296,71 @@ export default async function CapabilityPage() {
   const currentPriceActual = current.actualPoolPrice;
   const currentPriceForecast = current.forecastPoolPrice;
 
-  const currentCapability = current.capability ?? [];
-  const allCapabilities = states.flatMap((s) => s.capability ?? []);
-  const buckets = bucketByFuel(allCapabilities);
+  // ----- Fetch and shape AESO 7-Day capability data -----
+  const { rows: capRows, debug: capDebug } = await fetchAesoCapabilityRows();
+
+  // Focus on the same report date the WMRQH summary is using.
+  let rowsForDate = capRows.filter((r) => r.date === summary.date);
+
+  // If that date isn't in the capability report (e.g. report lag), fall
+  // back to the latest date present in the capability dataset.
+  if (!rowsForDate.length && capRows.length) {
+    const allDates = Array.from(new Set(capRows.map((r) => r.date))).sort();
+    const latestDate = allDates[allDates.length - 1];
+    rowsForDate = capRows.filter((r) => r.date === latestDate);
+  }
+
+  const hasCapability = rowsForDate.length > 0;
+  const scale = hasCapability ? determineAvailabilityScale(rowsForDate) : 1;
+
+  // Current-hour availability by fuel
+  let currentAvailByFuel: Record<string, number> = {};
+  if (hasCapability) {
+    const rowForCurrentHe =
+      rowsForDate.find((r) => r.he === currentHe) ?? rowsForDate[0];
+    currentAvailByFuel = Object.fromEntries(
+      Object.entries(rowForCurrentHe.values).map(([fuel, v]) => [
+        fuel,
+        v * scale,
+      ])
+    );
+  }
+
+  // Daily average availability by fuel
+  const dailyAvgAvailByFuel: Record<string, number> = {};
+  if (hasCapability) {
+    const allFuels = new Set<string>();
+    rowsForDate.forEach((r) => {
+      Object.keys(r.values).forEach((f) => allFuels.add(f));
+    });
+
+    for (const fuel of allFuels) {
+      const vals: number[] = [];
+      for (const r of rowsForDate) {
+        const v = r.values[fuel];
+        if (v != null && !Number.isNaN(v)) vals.push(v);
+      }
+      if (!vals.length) continue;
+      const avgRaw =
+        vals.reduce((sum, v) => sum + v, 0) / Math.max(vals.length, 1);
+      dailyAvgAvailByFuel[fuel] = avgRaw * scale;
+    }
+  }
+
+  // Sort fuels by descending current availability (or name as fallback)
+  const sortedCurrentFuels = Object.keys(currentAvailByFuel).sort((a, b) => {
+    const av = currentAvailByFuel[a] ?? 0;
+    const bv = currentAvailByFuel[b] ?? 0;
+    if (bv !== av) return bv - av;
+    return a.localeCompare(b);
+  });
+
+  const sortedAvgFuels = Object.keys(dailyAvgAvailByFuel).sort((a, b) => {
+    const av = dailyAvgAvailByFuel[a] ?? 0;
+    const bv = dailyAvgAvailByFuel[b] ?? 0;
+    if (bv !== av) return bv - av;
+    return a.localeCompare(b);
+  });
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100">
@@ -102,14 +368,14 @@ export default async function CapabilityPage() {
         {/* Page header */}
         <header className="mb-4 space-y-2">
           <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
-            Market Capability (Real AESO Load &amp; Price – Capability Pending)
+            Market Capability (Real AESO Load, Price &amp; Availability)
           </h1>
           <p className="max-w-3xl text-sm text-slate-400">
-            This view now uses only AESO&apos;s Actual/Forecast WMRQH report
-            for load and pool price. The previous synthetic capability model
-            has been removed. Capability by fuel will be wired to real AESO
-            and outage feeds (e.g., 7-Day Hourly Available Capability,
-            Supply Adequacy, CSD, etc.) in the next phase.
+            This view combines AESO&apos;s Actual/Forecast WMRQH report
+            (load and pool price) with the Seven-Day Hourly Available
+            Capability report. Availability by fuel is shown as delivered
+            by AESO (scaled to percentage where appropriate). No synthetic
+            modelling is used.
           </p>
         </header>
 
@@ -122,10 +388,13 @@ export default async function CapabilityPage() {
             <div className="space-y-1">
               <div className="inline-flex items-center gap-2 rounded-full bg-sky-900/80 px-3 py-1 text-[11px] font-medium">
                 <span className="h-2 w-2 rounded-full bg-sky-400" />
-                <span>SOURCE: AESO ActualForecastWMRQH (CSV)</span>
+                <span>
+                  SOURCE: AESO ActualForecastWMRQH (load &amp; price) +
+                  Seven-Day Hourly Available Capability (fuel availability)
+                </span>
               </div>
               <div className="text-[11px] text-sky-200/80">
-                Report date:{" "}
+                WMRQH report date:{" "}
                 <span className="font-mono">{summary.date}</span> · Current HE
                 (approx):{" "}
                 <span className="font-mono">
@@ -160,26 +429,42 @@ export default async function CapabilityPage() {
               </div>
             </div>
 
-            <p className="max-w-xs text-[11px] text-sky-200/80">
-              Capability and outages by fuel will be populated from additional
-              AESO reports (e.g., 7-Day Hourly Available Capability) once
-              those feeds are connected. No synthetic values are shown here.
-            </p>
+            <div className="max-w-xs space-y-1 text-[11px] text-sky-200/80">
+              <p>
+                Availability values are taken directly from AESO&apos;s
+                Seven-Day Hourly Available Capability report. Numbers are
+                treated as availability factors (0–1) where appropriate and
+                scaled to percentage for display.
+              </p>
+              {!capDebug.ok && (
+                <p className="text-[11px] text-amber-200/90">
+                  Capability debug: HTTP {capDebug.httpStatus || 0}, rows{" "}
+                  {capDebug.parsedRowCount}.{" "}
+                  {capDebug.errorMessage ? capDebug.errorMessage : null}
+                </p>
+              )}
+            </div>
           </div>
         </section>
 
         {/* Capability tables */}
         <section className="mt-6 space-y-8">
-          {/* Current hour capability shell */}
+          {/* Current hour capability */}
           <section className="space-y-3">
             <div className="flex items-baseline justify-between gap-4">
               <h2 className="text-lg font-semibold">
-                Current Hour Capability (HE {formatHe(currentHe)})
+                Current Hour Availability by Fuel (HE {formatHe(currentHe)})
               </h2>
-              <span className="text-xs text-amber-300">
-                Capability by fuel not yet wired to real AESO sources – shown
-                as empty.
-              </span>
+              {hasCapability ? (
+                <span className="text-xs text-slate-400">
+                  From AESO 7-Day Hourly Available Capability report, date{" "}
+                  {rowsForDate[0].date}.
+                </span>
+              ) : (
+                <span className="text-xs text-amber-300">
+                  No matching capability rows found for this date yet.
+                </span>
+              )}
             </div>
 
             <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/60">
@@ -188,38 +473,32 @@ export default async function CapabilityPage() {
                   <tr>
                     <th className="px-3 py-2 text-left font-medium">Fuel</th>
                     <th className="px-3 py-2 text-right font-medium">
-                      Available (MW)
-                    </th>
-                    <th className="px-3 py-2 text-right font-medium">
-                      Outage (MW)
+                      Availability (%)
                     </th>
                   </tr>
                 </thead>
                 <tbody>
-                  {currentCapability.length === 0 ? (
+                  {!hasCapability || sortedCurrentFuels.length === 0 ? (
                     <tr>
                       <td
-                        colSpan={3}
+                        colSpan={2}
                         className="px-3 py-4 text-center text-slate-500"
                       >
-                        Capability data by fuel is not yet connected to real
-                        AESO sources.
+                        Capability data by fuel could not be parsed from the
+                        AESO 7-Day report for this date/hour.
                       </td>
                     </tr>
                   ) : (
-                    currentCapability.map((row) => (
+                    sortedCurrentFuels.map((fuel) => (
                       <tr
-                        key={row.fuel}
+                        key={fuel}
                         className="border-t border-slate-800"
                       >
                         <td className="px-3 py-2 font-mono text-xs">
-                          {row.fuel}
+                          {fuel}
                         </td>
                         <td className="px-3 py-2 text-right">
-                          {formatNumber(row.availableMw)}
-                        </td>
-                        <td className="px-3 py-2 text-right">
-                          {formatNumber(row.outageMw)}
+                          {formatNumber(currentAvailByFuel[fuel], 1)}%
                         </td>
                       </tr>
                     ))
@@ -229,10 +508,10 @@ export default async function CapabilityPage() {
             </div>
           </section>
 
-          {/* Average capability shell */}
+          {/* Average capability over the day */}
           <section className="space-y-3">
             <h2 className="text-lg font-semibold">
-              Average Capability Over the Day
+              Average Availability Over the Day
             </h2>
             <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/60">
               <table className="min-w-full text-sm">
@@ -240,65 +519,36 @@ export default async function CapabilityPage() {
                   <tr>
                     <th className="px-3 py-2 text-left font-medium">Fuel</th>
                     <th className="px-3 py-2 text-right font-medium">
-                      Avg Available (MW)
-                    </th>
-                    <th className="px-3 py-2 text-right font-medium">
-                      Avg Outage (MW)
-                    </th>
-                    <th className="px-3 py-2 text-right font-medium">
-                      Outage %
+                      Avg Availability (%)
                     </th>
                   </tr>
                 </thead>
                 <tbody>
-                  {allCapabilities.length === 0 ? (
+                  {!hasCapability || sortedAvgFuels.length === 0 ? (
                     <tr>
                       <td
-                        colSpan={4}
+                        colSpan={2}
                         className="px-3 py-4 text-center text-slate-500"
                       >
-                        Daily capability statistics will appear here once real
-                        capability feeds are integrated.
+                        Daily capability statistics will appear here once the
+                        AESO 7-Day report format is successfully parsed for
+                        this date.
                       </td>
                     </tr>
                   ) : (
-                    Object.entries(buckets).map(([fuel, rowsForFuel]) => {
-                      const count = rowsForFuel.length || 1;
-                      const sumAvail = rowsForFuel.reduce(
-                        (sum, r) => sum + (r.availableMw ?? 0),
-                        0
-                      );
-                      const sumOut = rowsForFuel.reduce(
-                        (sum, r) => sum + (r.outageMw ?? 0),
-                        0
-                      );
-                      const avgAvail = sumAvail / count;
-                      const avgOut = sumOut / count;
-                      const outagePct =
-                        avgAvail + avgOut > 0
-                          ? (avgOut / (avgAvail + avgOut)) * 100
-                          : 0;
-
-                      return (
-                        <tr
-                          key={fuel}
-                          className="border-t border-slate-800"
-                        >
-                          <td className="px-3 py-2 font-mono text-xs">
-                            {fuel}
-                          </td>
-                          <td className="px-3 py-2 text-right">
-                            {formatNumber(avgAvail)}
-                          </td>
-                          <td className="px-3 py-2 text-right">
-                            {formatNumber(avgOut)}
-                          </td>
-                          <td className="px-3 py-2 text-right">
-                            {formatNumber(outagePct, 1)}%
-                          </td>
-                        </tr>
-                      );
-                    })
+                    sortedAvgFuels.map((fuel) => (
+                      <tr
+                        key={fuel}
+                        className="border-t border-slate-800"
+                      >
+                        <td className="px-3 py-2 font-mono text-xs">
+                          {fuel}
+                        </td>
+                        <td className="px-3 py-2 text-right">
+                          {formatNumber(dailyAvgAvailByFuel[fuel], 1)}%
+                        </td>
+                      </tr>
+                    ))
                   )}
                 </tbody>
               </table>
