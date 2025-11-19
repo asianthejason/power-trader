@@ -8,6 +8,9 @@ import {
 
 export const revalidate = 60;
 
+const AESO_WMRQH_CSV_URL =
+  "http://ets.aeso.ca/ets_web/ip/Market/Reports/ActualForecastWMRQHReportServlet?contentType=csv";
+
 function formatNumber(n: number | null | undefined, decimals = 0) {
   if (n == null || Number.isNaN(n)) return "—";
   return n.toLocaleString(undefined, {
@@ -66,37 +69,58 @@ export default async function LoadForecastPage() {
 
         <NavTabs />
 
+        {/* SOURCE / DEBUG + DOWNLOAD */}
         <section className="mb-4 rounded-2xl border border-emerald-900/60 bg-emerald-950/40 px-4 py-3 text-xs text-emerald-200">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="inline-flex items-center rounded-full bg-emerald-900/70 px-2 py-0.5 text-[11px] font-medium uppercase tracking-wide">
-              ● Source: AESO ActualForecastWMRQH (CSV)
-            </span>
-            {meta && (
-              <>
-                <span className="text-emerald-300">
-                  Report dates in file:{" "}
-                  {availableDates.length
-                    ? availableDates.join(", ")
-                    : "—"}
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="space-y-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="inline-flex items-center rounded-full bg-emerald-900/70 px-2 py-0.5 text-[11px] font-medium uppercase tracking-wide">
+                  ● Source: AESO ActualForecastWMRQH (CSV)
                 </span>
-                <span className="text-emerald-300">
-                  {" "}
-                  | HTTP: {meta.httpStatus} | Parsed rows:{" "}
-                  {meta.parsedRowCount}
-                </span>
-              </>
-            )}
-          </div>
+                {meta && (
+                  <>
+                    <span className="text-emerald-300">
+                      Report dates in file:{" "}
+                      {availableDates.length
+                        ? availableDates.join(", ")
+                        : "—"}
+                    </span>
+                    <span className="text-emerald-300">
+                      {" "}
+                      | HTTP: {meta.httpStatus} | Parsed rows:{" "}
+                      {meta.parsedRowCount}
+                    </span>
+                  </>
+                )}
+              </div>
 
-          <div className="mt-1 text-slate-300">
-            Current HE (approx, Alberta time):{" "}
-            <span className="font-mono">
-              HE {currentHeApprox.toString().padStart(2, "0")}
-            </span>
-          </div>
-          <div className="mt-1 text-slate-400">
-            Today (approx, Alberta):{" "}
-            <span className="font-mono">{albertaToday}</span>
+              <div className="mt-1 text-slate-300">
+                Current HE (approx, Alberta time):{" "}
+                <span className="font-mono">
+                  HE {currentHeApprox.toString().padStart(2, "0")}
+                </span>
+              </div>
+              <div className="mt-1 text-slate-400">
+                Today (approx, Alberta):{" "}
+                <span className="font-mono">{albertaToday}</span>
+              </div>
+            </div>
+
+            {/* Download button */}
+            <div className="flex flex-col items-end gap-1">
+              <a
+                href={AESO_WMRQH_CSV_URL}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center rounded-full border border-emerald-500/70 bg-emerald-500/10 px-3 py-1 text-[11px] font-medium text-emerald-100 hover:bg-emerald-500/20"
+              >
+                Download AESO CSV
+              </a>
+              <p className="max-w-xs text-right text-[10px] text-emerald-300/80">
+                Opens the original AESO Actual/Forecast WMRQH report in a new
+                tab so you can verify the numbers against this page.
+              </p>
+            </div>
           </div>
         </section>
 
