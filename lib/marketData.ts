@@ -82,35 +82,7 @@ function priceFromCushionPct(pct: number): number {
   return 50 + (0.2 - Math.min(pct, 0.2)) * 150;
 }
 
-// Split a CSV line that may contain quoted fields with commas.
-function splitCsvLine(line: string): string[] {
-  const result: string[] = [];
-  let current = "";
-  let inQuotes = false;
-
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-
-    if (ch === '"') {
-      // AESO data doesn't appear to use escaped quotes, so we can just toggle.
-      inQuotes = !inQuotes;
-    } else if (ch === "," && !inQuotes) {
-      result.push(current);
-      current = "";
-    } else {
-      current += ch;
-    }
-  }
-
-  result.push(current);
-  return result;
-}
-
-function stripQuotes(s: string): string {
-  return s.replace(/^"+|"+$/g, "");
-}
-
-/* ---------- Synthetic day builder ---------- */
+/* ---------- Synthetic day builder (for dashboard / NN pages) ---------- */
 
 function buildSyntheticDay(date: Date, variant: "today" | "nearest"): HourlyState[] {
   const base = new Date(date);
@@ -210,9 +182,7 @@ function buildSyntheticDay(date: Date, variant: "today" | "nearest"): HourlyStat
 
     fuelTypes.forEach((fuel, idx) => {
       const share =
-        idx === fuelTypes.length - 1
-          ? 1
-          : 0.1 + 0.15 * rand(20 + idx);
+        idx === fuelTypes.length - 1 ? 1 : 0.1 + 0.15 * rand(20 + idx);
 
       const fuelAvail =
         idx === fuelTypes.length - 1 ? remainingAvail : totalAvailable * share;
@@ -265,75 +235,104 @@ function buildSyntheticDay(date: Date, variant: "today" | "nearest"): HourlyStat
   return result;
 }
 
-/* ---------- AESO Actual / Forecast WMRQH integration ---------- */
+/* ---------- AESO Actual / Forecast WMRQH parsing ---------- */
 
-type AesoActualForecastRow = {
-  he: number; // 1..24
-  forecastPoolPrice: number;
-  actualPoolPrice: number;
-  forecastAil: number;
-  actualAil: number;
+export type AesoActualForecastRow = {
+  dateYMD: string; // "2025-11-19"
+  he: number; // 1–24
+  forecastPoolPrice: number | null;
+  actualPoolPrice: number | null;
+  forecastAil: number | null;
+  actualAil: number | null;
 };
 
-async function fetchAesoActualForecastToday(): Promise<AesoActualForecastRow[]> {
+export type AesoActualForecastMeta = {
+  httpStatus: number;
+  lineCount: number;
+  parsedRowCount: number;
+  reportDateText?: string;
+  availableDates: string[]; // YYYY-MM-DD
+};
+
+type ParsedAesoResult = {
+  rows: AesoActualForecastRow[];
+  meta: AesoActualForecastMeta;
+};
+
+function parseMaybeNumber(s: string): number | null {
+  const trimmed = s.trim();
+  if (!trimmed || trimmed === "-" || trimmed === '"-"') return null;
+  const cleaned = trimmed.replace(/[$,]/g, "");
+  const n = parseFloat(cleaned);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Low-level fetch + CSV parse for AESO Actual/Forecast WMRQH.
+ * Returns ALL rows in the file (possibly multiple dates).
+ */
+async function fetchAesoActualForecastCsv(): Promise<ParsedAesoResult> {
+  const url =
+    "http://ets.aeso.ca/ets_web/ip/Market/Reports/ActualForecastWMRQHReportServlet?contentType=csv";
+
   try {
-    const url =
-      "http://ets.aeso.ca/ets_web/ip/Market/Reports/ActualForecastWMRQHReportServlet?contentType=csv";
-
     const res = await fetch(url, { cache: "no-store" });
-    if (!res.ok) {
-      console.error("AESO ActualForecast fetch failed:", res.status, res.statusText);
-      return [];
-    }
-
+    const status = res.status;
     const text = await res.text();
+
     const lines = text.split(/\r?\n/);
+    let reportDateText: string | undefined;
+
+    const dataLines: string[] = [];
+
+    for (const raw of lines) {
+      const line = raw.trim();
+      if (!line) continue;
+
+      // Capture the "November 19, 2025." line
+      if (
+        !reportDateText &&
+        /[A-Za-z]+\s+\d{1,2},\s+\d{4}/.test(line.replace(/"/g, ""))
+      ) {
+        reportDateText = line.replace(/[".]/g, "").trim();
+      }
+
+      // Data lines look like: "11/19/2025 01","33.53","-","10,192","-","-"
+      if (line.startsWith('"') && line.includes(",")) {
+        dataLines.push(line);
+      }
+    }
 
     const rows: AesoActualForecastRow[] = [];
 
-    const toNum = (s: string): number => {
-      const cleaned = s.replace(/[$,]/g, "").trim();
-      if (!cleaned) return NaN;
-      const n = parseFloat(cleaned);
-      return Number.isFinite(n) ? n : NaN;
-    };
-
-    for (const rawLine of lines) {
-      const line = rawLine.trim();
-      if (!line) continue;
-
-      const parts = splitCsvLine(line);
-      // We expect at least: Date, FPP, APP, F AIL, A AIL
+    for (const line of dataLines) {
+      // Strip outer quotes then split on "," boundaries
+      const stripped = line.replace(/^"+|"+$/g, "");
+      const parts = stripped.split('","');
       if (parts.length < 5) continue;
 
-      const dateField = stripQuotes(parts[0].trim());
+      const dateTime = parts[0]; // e.g. 11/19/2025 01
+      const [mdy, heStr] = dateTime.split(/\s+/);
+      if (!mdy || !heStr) continue;
 
-      // Match "MM/DD/YYYY HH" or "MM/DD/YYYY H"
-      const m = dateField.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2})$/);
-      if (!m) {
-        // not a data row (header, title, blank, etc.)
-        continue;
-      }
-
-      const he = parseInt(m[4], 10);
+      const he = parseInt(heStr, 10);
       if (!Number.isFinite(he) || he < 1 || he > 24) continue;
 
-      const forecastPoolPrice = toNum(stripQuotes(parts[1] ?? ""));
-      const actualPoolPrice = toNum(stripQuotes(parts[2] ?? ""));
-      const forecastAil = toNum(stripQuotes(parts[3] ?? ""));
-      const actualAil = toNum(stripQuotes(parts[4] ?? ""));
+      const [mStr, dStr, yStr] = mdy.split("/");
+      if (!mStr || !dStr || !yStr) continue;
 
-      // If literally everything is NaN, skip
-      if (
-        !Number.isFinite(forecastPoolPrice) &&
-        !Number.isFinite(actualPoolPrice) &&
-        !Number.isFinite(forecastAil) &&
-        !Number.isFinite(actualAil)
-      ) {
-        continue;
-      }
+      const dateYMD = `${yStr}-${mStr.padStart(2, "0")}-${dStr.padStart(
+        2,
+        "0"
+      )}`;
+
+      const forecastPoolPrice = parseMaybeNumber(parts[1] ?? "");
+      const actualPoolPrice = parseMaybeNumber(parts[2] ?? "");
+      const forecastAil = parseMaybeNumber(parts[3] ?? "");
+      const actualAil = parseMaybeNumber(parts[4] ?? "");
 
       rows.push({
+        dateYMD,
         he,
         forecastPoolPrice,
         actualPoolPrice,
@@ -342,41 +341,139 @@ async function fetchAesoActualForecastToday(): Promise<AesoActualForecastRow[]> 
       });
     }
 
-    // Deduplicate by HE (first row wins) and sort 1→24
-    const byHe = new Map<number, AesoActualForecastRow>();
-    for (const r of rows) {
-      if (r.he >= 1 && r.he <= 24 && !byHe.has(r.he)) {
-        byHe.set(r.he, r);
-      }
-    }
+    const availableDates = Array.from(
+      new Set(rows.map((r) => r.dateYMD))
+    ).sort();
 
-    const finalRows = Array.from(byHe.values()).sort((a, b) => a.he - b.he);
-    if (finalRows.length === 0) {
-      console.error("AESO parser produced 0 rows from CSV");
-    }
-    return finalRows;
+    const meta: AesoActualForecastMeta = {
+      httpStatus: status,
+      lineCount: lines.length,
+      parsedRowCount: rows.length,
+      reportDateText,
+      availableDates,
+    };
+
+    console.log("[AESO WMRQH] meta:", meta);
+
+    return { rows, meta };
   } catch (err) {
-    console.error("Error parsing AESO ActualForecast:", err);
-    return [];
+    console.error("Error fetching/parsing AESO Actual/Forecast WMRQH:", err);
+    return {
+      rows: [],
+      meta: {
+        httpStatus: 0,
+        lineCount: 0,
+        parsedRowCount: 0,
+        availableDates: [],
+      },
+    };
   }
 }
 
-/* ---------- Public functions used by pages ---------- */
+function scoreRow(r: AesoActualForecastRow): number {
+  let score = 0;
+  if (r.forecastPoolPrice != null) score++;
+  if (r.actualPoolPrice != null) score++;
+  if (r.forecastAil != null) score++;
+  if (r.actualAil != null) score++;
+  return score;
+}
+
+/**
+ * Collapse multiple rows per HE into a single "best" row for a given date.
+ */
+function buildDayForDate(
+  rowsAll: AesoActualForecastRow[],
+  meta: AesoActualForecastMeta,
+  dateYMD: string
+): AesoLoadForecastDay | null {
+  const candidates = rowsAll.filter((r) => r.dateYMD === dateYMD);
+  if (candidates.length === 0) return null;
+
+  const byHe = new Map<number, AesoActualForecastRow>();
+
+  for (const r of candidates) {
+    const existing = byHe.get(r.he);
+    if (!existing || scoreRow(r) > scoreRow(existing)) {
+      byHe.set(r.he, r);
+    }
+  }
+
+  const rows = Array.from(byHe.values()).sort((a, b) => a.he - b.he);
+
+  return {
+    dateYMD,
+    rows,
+    meta,
+  };
+}
+
+/* ---------- Public AESO API for the Load Forecast page ---------- */
+
+export type AesoLoadForecastDay = {
+  dateYMD: string;
+  rows: AesoActualForecastRow[];
+  meta: AesoActualForecastMeta;
+};
+
+/**
+ * Get a cleaned day for the Load & Price Forecast page.
+ * - If dateYMD is provided and present in the CSV, use it.
+ * - Otherwise, use the **latest** date in the AESO file.
+ */
+export async function getAesoLoadForecastDay(
+  dateYMD?: string
+): Promise<AesoLoadForecastDay | null> {
+  const { rows, meta } = await fetchAesoActualForecastCsv();
+  if (rows.length === 0 || meta.availableDates.length === 0) {
+    return null;
+  }
+
+  const available = meta.availableDates;
+  let target = dateYMD && available.includes(dateYMD)
+    ? dateYMD
+    : available[available.length - 1]; // latest date in the file
+
+  const day = buildDayForDate(rows, meta, target);
+  if (!day) return null;
+
+  console.log("[AESO WMRQH] using date", target, "with", day.rows.length, "rows");
+  return day;
+}
+
+/* ---------- Blended synthetic + AESO for the dashboard ---------- */
+
+async function fetchAesoActualForecastToday(): Promise<
+  Map<number, AesoActualForecastRow>
+> {
+  const { rows, meta } = await fetchAesoActualForecastCsv();
+  if (rows.length === 0 || meta.availableDates.length === 0) {
+    return new Map();
+  }
+
+  // "Today" for modelling = latest date present in the file
+  const latest = meta.availableDates[meta.availableDates.length - 1];
+  const day = buildDayForDate(rows, meta, latest);
+  if (!day) return new Map();
+
+  const byHe = new Map<number, AesoActualForecastRow>();
+  for (const r of day.rows) {
+    const existing = byHe.get(r.he);
+    if (!existing || scoreRow(r) > scoreRow(existing)) {
+      byHe.set(r.he, r);
+    }
+  }
+  return byHe;
+}
 
 export async function getTodayHourlyStates(): Promise<HourlyState[]> {
   const now = new Date();
   const synthetic = buildSyntheticDay(now, "today");
 
-  const realRows = await fetchAesoActualForecastToday();
-  if (realRows.length === 0) {
-    // All synthetic if we couldn't fetch real data
+  const byHe = await fetchAesoActualForecastToday();
+  if (byHe.size === 0) {
     return synthetic;
   }
-
-  const byHe = new Map<number, AesoActualForecastRow>();
-  realRows.forEach((r) => {
-    if (r.he >= 1 && r.he <= 24 && !byHe.has(r.he)) byHe.set(r.he, r);
-  });
 
   return synthetic.map((state) => {
     const row = byHe.get(state.he);
@@ -384,12 +481,10 @@ export async function getTodayHourlyStates(): Promise<HourlyState[]> {
 
     const oldLoad = state.actualLoad;
 
-    const actualLoad = Number.isFinite(row.actualAil)
-      ? Math.round(row.actualAil)
-      : state.actualLoad;
-    const forecastLoad = Number.isFinite(row.forecastAil)
-      ? Math.round(row.forecastAil)
-      : state.forecastLoad;
+    const actualLoad =
+      row.actualAil != null ? Math.round(row.actualAil) : state.actualLoad;
+    const forecastLoad =
+      row.forecastAil != null ? Math.round(row.forecastAil) : state.forecastLoad;
 
     // Adjust cushion to be consistent with new actual load
     const deltaLoad = actualLoad - oldLoad;
@@ -400,12 +495,14 @@ export async function getTodayHourlyStates(): Promise<HourlyState[]> {
 
     return {
       ...state,
-      forecastPoolPrice: Number.isFinite(row.forecastPoolPrice)
-        ? Math.round(row.forecastPoolPrice)
-        : state.forecastPoolPrice,
-      actualPoolPrice: Number.isFinite(row.actualPoolPrice)
-        ? Math.round(row.actualPoolPrice)
-        : state.actualPoolPrice,
+      forecastPoolPrice:
+        row.forecastPoolPrice != null
+          ? Math.round(row.forecastPoolPrice)
+          : state.forecastPoolPrice,
+      actualPoolPrice:
+        row.actualPoolPrice != null
+          ? Math.round(row.actualPoolPrice)
+          : state.actualPoolPrice,
       forecastLoad,
       actualLoad,
       cushionMw,
