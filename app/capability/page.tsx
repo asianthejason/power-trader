@@ -32,6 +32,18 @@ function formatPrice(n: number | null | undefined): string {
   return `$${formatNumber(n, 2)}`;
 }
 
+/**
+ * Extract the nameplate capacity (MC) in MW from a fuel label like:
+ * "SOLAR (MC = 1856 MW)" -> 1856
+ */
+function getFuelRatedCapacityMw(label: string): number | null {
+  const m = label.match(/MC\s*=\s*([\d,]+)/i);
+  if (!m) return null;
+  const raw = m[1].replace(/,/g, "");
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
 /** Same Alberta-time helper as /load-forecast */
 function approxAlbertaNow() {
   const nowUtc = new Date();
@@ -630,13 +642,16 @@ export default async function CapabilityPage() {
                     <th className="px-3 py-2 text-right font-medium">
                       Availability (%)
                     </th>
+                    <th className="px-3 py-2 text-right font-medium">
+                      Available (MW)
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
                   {!hasCapability || sortedCurrentFuels.length === 0 ? (
                     <tr>
                       <td
-                        colSpan={2}
+                        colSpan={3}
                         className="px-3 py-4 text-center text-slate-500"
                       >
                         Capability data by fuel could not be derived from the
@@ -645,19 +660,35 @@ export default async function CapabilityPage() {
                       </td>
                     </tr>
                   ) : (
-                    sortedCurrentFuels.map((fuel) => (
-                      <tr
-                        key={fuel}
-                        className="border-t border-slate-800"
-                      >
-                        <td className="px-3 py-2 font-mono text-xs">
-                          {fuel}
-                        </td>
-                        <td className="px-3 py-2 text-right">
-                          {formatNumber(currentAvailByFuel[fuel], 1)}%
-                        </td>
-                      </tr>
-                    ))
+                    sortedCurrentFuels.map((fuel) => {
+                      const pct = currentAvailByFuel[fuel];
+                      const mcMw = getFuelRatedCapacityMw(fuel);
+                      const availableMw =
+                        mcMw != null &&
+                        pct != null &&
+                        !Number.isNaN(pct)
+                          ? (mcMw * pct) / 100
+                          : null;
+
+                      return (
+                        <tr
+                          key={fuel}
+                          className="border-t border-slate-800"
+                        >
+                          <td className="px-3 py-2 font-mono text-xs">
+                            {fuel}
+                          </td>
+                          <td className="px-3 py-2 text-right">
+                            {formatNumber(pct, 1)}%
+                          </td>
+                          <td className="px-3 py-2 text-right">
+                            {availableMw != null
+                              ? `${formatNumber(availableMw, 1)} MW`
+                              : "—"}
+                          </td>
+                        </tr>
+                      );
+                    })
                   )}
                 </tbody>
               </table>
@@ -677,13 +708,16 @@ export default async function CapabilityPage() {
                     <th className="px-3 py-2 text-right font-medium">
                       Avg Availability (%)
                     </th>
+                    <th className="px-3 py-2 text-right font-medium">
+                      Avg Available (MW)
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
                   {!hasCapability || sortedAvgFuels.length === 0 ? (
                     <tr>
                       <td
-                        colSpan={2}
+                        colSpan={3}
                         className="px-3 py-4 text-center text-slate-500"
                       >
                         Daily capability statistics will appear here once the
@@ -691,19 +725,35 @@ export default async function CapabilityPage() {
                       </td>
                     </tr>
                   ) : (
-                    sortedAvgFuels.map((fuel) => (
-                      <tr
-                        key={fuel}
-                        className="border-t border-slate-800"
-                      >
-                        <td className="px-3 py-2 font-mono text-xs">
-                          {fuel}
-                        </td>
-                        <td className="px-3 py-2 text-right">
-                          {formatNumber(dailyAvgAvailByFuel[fuel], 1)}%
-                        </td>
-                      </tr>
-                    ))
+                    sortedAvgFuels.map((fuel) => {
+                      const pct = dailyAvgAvailByFuel[fuel];
+                      const mcMw = getFuelRatedCapacityMw(fuel);
+                      const availableMw =
+                        mcMw != null &&
+                        pct != null &&
+                        !Number.isNaN(pct)
+                          ? (mcMw * pct) / 100
+                          : null;
+
+                      return (
+                        <tr
+                          key={fuel}
+                          className="border-t border-slate-800"
+                        >
+                          <td className="px-3 py-2 font-mono text-xs">
+                            {fuel}
+                          </td>
+                          <td className="px-3 py-2 text-right">
+                            {formatNumber(pct, 1)}%
+                          </td>
+                          <td className="px-3 py-2 text-right">
+                            {availableMw != null
+                              ? `${formatNumber(availableMw, 1)} MW`
+                              : "—"}
+                          </td>
+                        </tr>
+                      );
+                    })
                   )}
                 </tbody>
               </table>
