@@ -30,7 +30,7 @@ export type HourlyState = {
   forecastLoad: number;
   actualLoad: number;
 
-  // Nearest neighbour “reference” (synthetic for now)
+  // Nearest neighbour “reference”
   nnPrice: number;
   nnLoad: number;
 
@@ -61,6 +61,8 @@ export type DailySummary = {
   avgCushionPct: number;
 };
 
+/* ---------- Helpers ---------- */
+
 function classifyCushion(pct: number): CushionFlag {
   if (!Number.isFinite(pct) || pct <= 0) return "unknown";
   if (pct < 0.06) return "tight";
@@ -73,8 +75,10 @@ function priceFromCushionPct(pct: number): number {
   if (pct < 0.03) return 800 + (0.03 - pct) * 8000;
   if (pct < 0.06) return 400 + (0.06 - pct) * 4000;
   if (pct < 0.12) return 120 + (0.12 - pct) * 800;
-  return 50 + (0.20 - Math.min(pct, 0.2)) * 150;
+  return 50 + (0.2 - Math.min(pct, 0.2)) * 150;
 }
+
+/* ---------- Synthetic day builder (unchanged) ---------- */
 
 function buildSyntheticDay(date: Date, variant: "today" | "nearest"): HourlyState[] {
   const base = new Date(date);
@@ -97,7 +101,6 @@ function buildSyntheticDay(date: Date, variant: "today" | "nearest"): HourlyStat
     }
 
     const rand = (seed: number) => {
-      // lightweight deterministic-ish pseudo-random based on hour
       const x = Math.sin(seed * 999 + he * 77) * 10000;
       return x - Math.floor(x);
     };
@@ -122,9 +125,9 @@ function buildSyntheticDay(date: Date, variant: "today" | "nearest"): HourlyStat
         ? solarForecast * (1 + (rand(4) - 0.5) * 0.15)
         : solarForecast;
 
-    // Total available capability (very rough)
-    const baseAvail = actualLoad * 1.12 + 500; // 12% + a bit of margin
-    const outageFactor = 0.04 + 0.02 * rand(5); // 4-6% outages
+    // Total available capability (rough)
+    const baseAvail = actualLoad * 1.12 + 500;
+    const outageFactor = 0.04 + 0.02 * rand(5);
     const outageMw = baseAvail * outageFactor;
     const totalAvailable = baseAvail - outageMw + windActual + solarActual;
 
@@ -138,12 +141,12 @@ function buildSyntheticDay(date: Date, variant: "today" | "nearest"): HourlyStat
       price * (variant === "today" ? 0.95 + 0.1 * rand(7) : 0.9 + 0.1 * rand(7));
 
     // Interties (AB-BC, AB-SK, AB-MATL)
-    const tightFactor = Math.max(0, 0.12 - cushionPct); // bigger when tight
+    const tightFactor = Math.max(0, 0.12 - cushionPct);
     const bcImportCap = 800;
     const skImportCap = 250;
     const matlImportCap = 300;
 
-    const bcSched = 200 + tightFactor * 400; // more imports when tight
+    const bcSched = 200 + tightFactor * 400;
     const skSched = 50 + tightFactor * 150;
     const matlSched = 80 + tightFactor * 180;
 
@@ -171,7 +174,7 @@ function buildSyntheticDay(date: Date, variant: "today" | "nearest"): HourlyStat
       },
     ];
 
-    // Capability by fuel (split the totalAvailable across fuels)
+    // Capability by fuel
     const capability: CapabilityByFuel[] = [];
     let remainingAvail = totalAvailable;
     let remainingOut = outageMw;
@@ -180,7 +183,7 @@ function buildSyntheticDay(date: Date, variant: "today" | "nearest"): HourlyStat
       const share =
         idx === fuelTypes.length - 1
           ? 1
-          : 0.1 + 0.15 * rand(20 + idx); // random-ish mix
+          : 0.1 + 0.15 * rand(20 + idx);
 
       const fuelAvail =
         idx === fuelTypes.length - 1 ? remainingAvail : totalAvailable * share;
@@ -232,14 +235,161 @@ function buildSyntheticDay(date: Date, variant: "today" | "nearest"): HourlyStat
   return result;
 }
 
+/* ---------- AESO Actual / Forecast WMRQH integration ---------- */
+
+type AesoActualForecastRow = {
+  he: number; // 1..24
+  forecastPoolPrice: number;
+  actualPoolPrice: number;
+  forecastAil: number;
+  actualAil: number;
+};
+
+/**
+ * Fetches AESO Actual/Forecast WMRQH CSV and returns rows keyed by HE.
+ * This is intentionally defensive: if anything goes wrong, it returns [].
+ */
+async function fetchAesoActualForecastToday(): Promise<AesoActualForecastRow[]> {
+  try {
+    const url =
+      "http://ets.aeso.ca/ets_web/ip/Market/Reports/ActualForecastWMRQHReportServlet?contentType=csv";
+
+    const res = await fetch(url, {
+      // We control caching via Next revalidate; here we always fetch fresh.
+      cache: "no-store",
+    });
+
+    if (!res.ok) {
+      console.error("AESO ActualForecast fetch failed:", res.status, res.statusText);
+      return [];
+    }
+
+    const text = await res.text();
+    const lines = text.split(/\r?\n/).map((l) => l.trim());
+    if (lines.length < 2) return [];
+
+    // Find header row (line that contains "Forecast Pool Price")
+    let headerIndex = lines.findIndex((l) =>
+      l.toLowerCase().includes("forecast pool price")
+    );
+    if (headerIndex === -1) return [];
+
+    const header = lines[headerIndex].split(",");
+
+    const findIndex = (frag: string) =>
+      header.findIndex((h) => h.toLowerCase().includes(frag));
+
+    const idxHe = findIndex("he");
+    const idxFp = findIndex("forecast pool");
+    const idxAp = findIndex("actual posted pool");
+    const idxFa = findIndex("forecast ail");
+    const idxAa = findIndex("actual ail");
+
+    if (idxHe === -1 || idxFp === -1 || idxAp === -1 || idxFa === -1 || idxAa === -1) {
+      console.error("AESO header mismatch:", header);
+      return [];
+    }
+
+    const rows: AesoActualForecastRow[] = [];
+
+    for (let i = headerIndex + 1; i < lines.length; i++) {
+      const line = lines[i];
+      if (!line || !line.includes(",")) continue;
+
+      const parts = line.split(",");
+      const heStr = parts[idxHe]?.trim();
+      const he = parseInt(heStr, 10);
+      if (!Number.isFinite(he)) continue;
+
+      const toNum = (idx: number) => {
+        const v = parts[idx]?.replace(/[$]/g, "").trim();
+        const n = parseFloat(v);
+        return Number.isFinite(n) ? n : NaN;
+      };
+
+      rows.push({
+        he,
+        forecastPoolPrice: toNum(idxFp),
+        actualPoolPrice: toNum(idxAp),
+        forecastAil: toNum(idxFa),
+        actualAil: toNum(idxAa),
+      });
+    }
+
+    // Keep only HE 1..24 and dedupe by HE (first occurrence wins)
+    const byHe = new Map<number, AesoActualForecastRow>();
+    for (const r of rows) {
+      if (r.he >= 1 && r.he <= 24 && !byHe.has(r.he)) byHe.set(r.he, r);
+    }
+
+    return Array.from(byHe.values()).sort((a, b) => a.he - b.he);
+  } catch (err) {
+    console.error("Error parsing AESO ActualForecast:", err);
+    return [];
+  }
+}
+
+/* ---------- Public functions used by pages ---------- */
+
 export async function getTodayHourlyStates(): Promise<HourlyState[]> {
   const now = new Date();
-  return buildSyntheticDay(now, "today");
+  const synthetic = buildSyntheticDay(now, "today");
+
+  // Try to overlay real AESO hourly load/price
+  const realRows = await fetchAesoActualForecastToday();
+
+  if (realRows.length === 0) {
+    // All synthetic if we couldn't fetch real data
+    return synthetic;
+  }
+
+  const byHe = new Map<number, AesoActualForecastRow>();
+  realRows.forEach((r) => {
+    if (r.he >= 1 && r.he <= 24 && !byHe.has(r.he)) {
+      byHe.set(r.he, r);
+    }
+  });
+
+  return synthetic.map((state) => {
+    const row = byHe.get(state.he);
+    if (!row) return state;
+
+    const oldLoad = state.actualLoad;
+    const actualLoad = Number.isFinite(row.actualAil)
+      ? Math.round(row.actualAil)
+      : state.actualLoad;
+    const forecastLoad = Number.isFinite(row.forecastAil)
+      ? Math.round(row.forecastAil)
+      : state.forecastLoad;
+
+    // Adjust cushion to be consistent with new actual load.
+    // We assume total available MW stayed the same and only load changed.
+    const deltaLoad = actualLoad - oldLoad;
+    const cushionMw = state.cushionMw - deltaLoad;
+    const cushionPercent =
+      actualLoad > 0 ? cushionMw / actualLoad : state.cushionPercent;
+    const cushionFlag = classifyCushion(cushionPercent);
+
+    return {
+      ...state,
+      forecastPoolPrice: Number.isFinite(row.forecastPoolPrice)
+        ? Math.round(row.forecastPoolPrice)
+        : state.forecastPoolPrice,
+      actualPoolPrice: Number.isFinite(row.actualPoolPrice)
+        ? Math.round(row.actualPoolPrice)
+        : state.actualPoolPrice,
+      forecastLoad,
+      actualLoad,
+      cushionMw,
+      cushionPercent,
+      cushionFlag,
+    };
+  });
 }
 
 export async function getNearestNeighbourStates(): Promise<HourlyState[]> {
   const ref = new Date();
-  ref.setDate(ref.getDate() - 14); // two weeks ago as a fake NN
+  ref.setDate(ref.getDate() - 14); // pretend NN is two weeks ago
   return buildSyntheticDay(ref, "nearest");
 }
 
