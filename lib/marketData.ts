@@ -430,16 +430,42 @@ export async function getAesoLoadForecastDay(
   }
 
   const available = meta.availableDates;
-  let target = dateYMD && available.includes(dateYMD)
-    ? dateYMD
-    : available[available.length - 1]; // latest date in the file
+  const latest = available[available.length - 1];
 
-  const day = buildDayForDate(rows, meta, target);
-  if (!day) return null;
+  const requested = dateYMD;
+  // Start by assuming the requested date (if any), otherwise the latest date.
+  let target = requested ?? latest;
 
-  console.log("[AESO WMRQH] using date", target, "with", day.rows.length, "rows");
+  // Always try the requested/target date first, even if it is not in
+  // `availableDates` for some reason.
+  let day = buildDayForDate(rows, meta, target);
+
+  // If that failed (no rows for that date), fall back to the latest date
+  // present in the file.
+  if ((!day || day.rows.length === 0) && target !== latest) {
+    target = latest;
+    day = buildDayForDate(rows, meta, target);
+  }
+
+  if (!day) {
+    console.log("[AESO WMRQH] getAesoLoadForecastDay: no day found", {
+      requested,
+      latest,
+      available,
+    });
+    return null;
+  }
+
+  console.log("[AESO WMRQH] getAesoLoadForecastDay", {
+    requested,
+    chosenDate: target,
+    available,
+    rowCount: day.rows.length,
+  });
+
   return day;
 }
+
 
 /* ---------- Blended synthetic + AESO for the dashboard ---------- */
 

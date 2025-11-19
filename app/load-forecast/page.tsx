@@ -44,8 +44,8 @@ type PageProps = {
 };
 
 export default async function LoadForecastPage({ searchParams }: PageProps) {
-  const requestedDate = searchParams?.date;
-  const day = await getAesoLoadForecastDay(requestedDate);
+  const requestedDateParam = searchParams?.date;
+  const day = await getAesoLoadForecastDay(requestedDateParam);
 
   const albertaToday = getApproxAlbertaDateYMD();
   const currentHeApprox = getApproxAlbertaHe();
@@ -89,12 +89,14 @@ export default async function LoadForecastPage({ searchParams }: PageProps) {
                     : "—"}
                 </span>
                 <span className="text-emerald-300">
+                  {" "}
                   | HTTP: {meta.httpStatus} | Parsed rows:{" "}
                   {meta.parsedRowCount}
                 </span>
               </>
             )}
           </div>
+
           <div className="mt-1 flex flex-wrap items-center gap-2">
             <span className="text-slate-300">
               Viewing date:{" "}
@@ -103,11 +105,21 @@ export default async function LoadForecastPage({ searchParams }: PageProps) {
               </span>
             </span>
             <span className="text-slate-400">
+              {" "}
               (Current HE approximation in Alberta:{" "}
               <span className="font-mono">
                 HE {currentHeApprox.toString().padStart(2, "0")}
               </span>
               )
+            </span>
+          </div>
+
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-slate-400">
+            <span>
+              Requested date param:{" "}
+              <span className="font-mono">
+                {requestedDateParam ?? "none"}
+              </span>
             </span>
           </div>
 
