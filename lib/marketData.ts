@@ -516,7 +516,7 @@ async function loadHistoricalNnDays(): Promise<NnDay[]> {
   const fs = await import("node:fs/promises");
   const path = await import("node:path");
 
-  const filePath = path.join.default(
+  const filePath = path.join(
     process.cwd(),
     "lib",
     "data",
