@@ -464,10 +464,14 @@ export default async function DashboardPage() {
     }
   }
 
-  // Map today’s *current* net interchange from CSD onto the current HE row.
-  const currentHe = now?.he;
-  if (currentHe && csdSnapshot.systemNetInterchangeMw != null) {
-    const target = rows.find((r) => r.he === currentHe);
+  // Map today’s *current* net interchange from CSD onto the *current Alberta HE* row.
+  // We compute the HE directly from Alberta clock time so the non-zero tieline
+  // appears in the visually current HE.
+  const { nowAb } = approxAlbertaNow();
+  const currentHeAb = nowAb.getHours() + 1; // 0..23 → HE 1..24
+
+  if (csdSnapshot.systemNetInterchangeMw != null) {
+    const target = rows.find((r) => r.he === currentHeAb);
     if (target) {
       target.rtTielines = csdSnapshot.systemNetInterchangeMw;
     }
