@@ -19,14 +19,14 @@ function formatNumber(
   });
 }
 
-// Rough "now" in Alberta (America/Edmonton).
+// Approximate "now" in Alberta as UTC-7. This is what you used elsewhere
+// and it avoids the Invalid Date issues from locale-based parsing.
 function approxAlbertaNow() {
-  const now = new Date();
-  const ab = new Date(
-    now.toLocaleString("en-CA", { timeZone: "America/Edmonton" })
-  );
-  const isoDate = ab.toISOString().slice(0, 10); // YYYY-MM-DD
-  return { nowAb: ab, isoDate };
+  const nowUtc = new Date();
+  const offsetMs = 7 * 60 * 60 * 1000; // 7 hours
+  const nowAb = new Date(nowUtc.getTime() - offsetMs);
+  const isoDate = nowAb.toISOString().slice(0, 10); // YYYY-MM-DD
+  return { nowAb, isoDate };
 }
 
 type IntertiePath = "AB-BC" | "AB-SK" | "AB-MATL";
@@ -62,10 +62,8 @@ async function fetchAesoInterchangeSnapshot(): Promise<IntertieSnapshotResult> {
     "http://ets.aeso.ca/ets_web/ip/Market/Reports/CSDReportServlet";
 
   try {
-    const res = await fetch(AESO_CSD_URL, {
-      cache: "no-store",
-      next: { revalidate: 0 },
-    });
+    // Let Next.js handle caching at the page level via export const revalidate.
+    const res = await fetch(AESO_CSD_URL);
 
     if (!res.ok) {
       console.error("Failed to fetch AESO CSD:", res.status, res.statusText);
@@ -166,7 +164,6 @@ type AesoInterchangeJson = {
     [key: string]:
       | {
           Allocations?: AesoAllocation[];
-          // plus other fields we ignore
         }
       | undefined;
   };
@@ -217,10 +214,7 @@ async function fetchTodayAtcRows(): Promise<{
   }
 
   try {
-    const res = await fetch(url.toString(), {
-      cache: "no-store",
-      next: { revalidate: 0 },
-    });
+    const res = await fetch(url.toString());
 
     if (!res.ok) {
       console.error("Failed to fetch AESO ATC JSON:", res.statusText);
@@ -476,9 +470,9 @@ export default async function IntertiesPage() {
                         {direction}
                       </td>
                       <td className="px-3 py-2 text-[11px] text-slate-400">
-                        Positive = exports from Alberta; negative = imports
-                        into Alberta. Values should line up with the
-                        corresponding rows in the CSD INTERCHANGE table.
+                        Positive = exports from Alberta; negative = imports into
+                        Alberta. Values should line up with the corresponding
+                        rows in the CSD INTERCHANGE table.
                       </td>
                     </tr>
                   );
@@ -617,8 +611,8 @@ export default async function IntertiesPage() {
             (itc.aeso.ca/itc/public/api/v2/interchange, dataType=ATC). These are
             the same curves that back your Excel &quot;Provincial Available
             Transfer Capacity&quot; sheet – you can append additional derived
-            columns (TRM, expected provincial flow, &quot;we can&quot; MW, etc.)
-            in your own model or a future backend job without introducing
+            columns (TRM, expected provincial flow, &quot;we can&quot; MW,
+            etc.) in your own model or a future backend job without introducing
             synthetic inputs.
           </p>
         </section>
