@@ -1,4 +1,3 @@
-// src/app/interties/AutoRefresh.tsx
 "use client";
 
 import { useEffect } from "react";
@@ -13,7 +12,7 @@ interface AutoRefreshProps {
  * This causes Next to re-run the server component and re-fetch data,
  * so the user sees new AESO values without manually reloading.
  */
-export default function AutoRefresh({ intervalMs = 30000 }: AutoRefreshProps) {
+export default function AutoRefresh({ intervalMs = 1000 }: AutoRefreshProps) {
   const router = useRouter();
 
   useEffect(() => {

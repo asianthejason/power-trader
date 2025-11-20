@@ -1,10 +1,8 @@
-// src/app/interties/page.tsx
-
 import NavTabs from "../components/NavTabs";
 import AutoRefresh from "./AutoRefresh";
 
-// Revalidate every 30 seconds – matches the client-side refresh interval.
-export const revalidate = 30;
+// Revalidate every 1 second – works with the client-side refresh interval.
+export const revalidate = 1;
 
 /* ---------- helpers ---------- */
 
@@ -325,8 +323,8 @@ export default async function IntertiesPage() {
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100">
-      {/* client-side auto-refresh every 30s */}
-      <AutoRefresh intervalMs={30000} />
+      {/* client-side auto-refresh every 1s */}
+      <AutoRefresh intervalMs={1000} />
 
       <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
         {/* Header */}
