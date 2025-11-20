@@ -1,15 +1,23 @@
 // app/renewables/page.tsx
+
 import NavTabs from "../components/NavTabs";
-import { getTodayHourlyStates, summarizeDay } from "../../lib/marketData";
 
 export const revalidate = 60;
 
-// AESO links we rely on here:
-// - Live actuals: Current Supply & Demand (CSD) report
+// AESO sources used on this page (all *real* data, no synthetic):
+// - Current Supply & Demand (CSD) – live actual wind & solar
+// - Wind 12-hour forecast CSV
+// - Solar 12-hour forecast CSV
 const AESO_CSD_URL =
-  "https://ets.aeso.ca/ets_web/ip/Market/Reports/CSDReportServlet";
+  "http://ets.aeso.ca/ets_web/ip/Market/Reports/CSDReportServlet";
 
-/* ---------- helpers ---------- */
+const AESO_WIND_12H_URL =
+  "https://ets.aeso.ca/Market/Reports/Manual/Operations/prodweb_reports/wind_solar_forecast/wind_rpt_shortterm.csv";
+
+const AESO_SOLAR_12H_URL =
+  "https://ets.aeso.ca/Market/Reports/Manual/Operations/prodweb_reports/wind_solar_forecast/solar_rpt_shortterm.csv";
+
+/* ---------- small helpers ---------- */
 
 function formatNumber(n: number | null | undefined, decimals = 0) {
   if (n == null || Number.isNaN(n)) return "—";
@@ -19,6 +27,49 @@ function formatNumber(n: number | null | undefined, decimals = 0) {
   });
 }
 
+/** Very small CSV splitter that respects quoted fields. */
+function splitCsvLine(line: string): string[] {
+  const result: string[] = [];
+  let current = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+
+    if (ch === '"') {
+      // Toggle quote state; double quotes inside a quoted field are collapsed.
+      if (i + 1 < line.length && line[i + 1] === '"') {
+        current += '"';
+        i++; // skip escaped quote
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+
+    if (ch === "," && !inQuotes) {
+      result.push(current);
+      current = "";
+      continue;
+    }
+
+    current += ch;
+  }
+
+  result.push(current);
+  return result;
+}
+
+function parseMw(raw: string | undefined): number | null {
+  if (!raw) return null;
+  const cleaned = raw.replace(/["\s,]/g, "");
+  if (!cleaned) return null;
+  const val = Number(cleaned);
+  return Number.isFinite(val) ? val : null;
+}
+
+/* ---------- CSD snapshot (actuals) ---------- */
+
 type CsdRenewablesSnapshot = {
   windMw: number | null;
   solarMw: number | null;
@@ -26,17 +77,15 @@ type CsdRenewablesSnapshot = {
 };
 
 /**
- * Very lightweight HTML scraper for AESO CSD.
+ * Lightweight HTML scraper for AESO CSD.
  *
- * We look for "Wind Generation" and "Solar Generation" followed by a MW value.
- * The CSD layout can change, so this is written to fail gracefully: if parsing
- * fails for any reason, we just return nulls and fall back to synthetic data.
+ * We look for lines like "Wind Generation ... 1234 MW" and
+ * "Solar Generation ... 567 MW". If parsing fails, we return nulls.
  */
 async function fetchCsdRenewablesSnapshot(): Promise<CsdRenewablesSnapshot> {
   try {
     const res = await fetch(AESO_CSD_URL, {
       cache: "no-store",
-      // AESO is plain HTML, no special headers needed.
     });
 
     if (!res.ok) {
@@ -48,18 +97,19 @@ async function fetchCsdRenewablesSnapshot(): Promise<CsdRenewablesSnapshot> {
 
     const html = await res.text();
 
-    // Try to find something like "Wind Generation ... 1234 MW"
-    const windMatch = html.match(
-      /Wind\s*Generation[^0-9\-]*([0-9,]+)\s*MW/i
-    );
-    const solarMatch = html.match(
-      /Solar\s*Generation[^0-9\-]*([0-9,]+)\s*MW/i
-    );
+    const windMatch =
+      html.match(/Wind\s*Generation[^0-9\-]*([0-9,]+)\s*MW/i) ||
+      html.match(/Wind[^0-9\-]*([0-9,]+)\s*MW/i);
+
+    const solarMatch =
+      html.match(/Solar\s*Generation[^0-9\-]*([0-9,]+)\s*MW/i) ||
+      html.match(/Solar[^0-9\-]*([0-9,]+)\s*MW/i);
 
     const windMw =
       windMatch && windMatch[1]
         ? parseInt(windMatch[1].replace(/,/g, ""), 10)
         : null;
+
     const solarMw =
       solarMatch && solarMatch[1]
         ? parseInt(solarMatch[1].replace(/,/g, ""), 10)
@@ -76,41 +126,114 @@ async function fetchCsdRenewablesSnapshot(): Promise<CsdRenewablesSnapshot> {
   }
 }
 
-/**
- * Helper to pull a "current HE" from the day summary if available.
- * Falls back to null if summarizeDay doesn't expose it.
- */
-function getCurrentHeFromSummary(summary: any): number | null {
-  // Adjust these field names if your summarizeDay() shape is different.
-  if (typeof summary?.currentHe === "number") return summary.currentHe;
-  if (typeof summary?.nowHe === "number") return summary.nowHe;
-  if (typeof summary?.approxCurrentHe === "number")
-    return summary.approxCurrentHe;
-  return null;
+/* ---------- 12-hour forecast (CSV) ---------- */
+
+type RenewableType = "wind" | "solar";
+
+type ForecastRow = {
+  timeLabel: string; // whatever timestamp string AESO gives us
+  min: number | null;
+  mostLikely: number | null;
+  max: number | null;
+};
+
+async function fetchAesoForecast12h(kind: RenewableType): Promise<ForecastRow[]> {
+  const url = kind === "wind" ? AESO_WIND_12H_URL : AESO_SOLAR_12H_URL;
+
+  try {
+    const res = await fetch(url, { cache: "no-store" });
+
+    if (!res.ok) {
+      console.error(
+        `Failed to fetch AESO ${kind} 12-hour forecast (${res.status} ${res.statusText})`
+      );
+      return [];
+    }
+
+    const text = await res.text();
+    const lines = text
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0);
+
+    if (lines.length < 2) {
+      console.error(`AESO ${kind} forecast CSV has no data lines.`);
+      return [];
+    }
+
+    const headerCells = splitCsvLine(lines[0]).map((h) => h.trim());
+    const dateIdx =
+      headerCells.findIndex((h) => /date|time/i.test(h)) ?? 0;
+
+    let minIdx = headerCells.findIndex((h) => /min/i.test(h));
+    let mostIdx = headerCells.findIndex((h) => /most/i.test(h));
+    let maxIdx = headerCells.findIndex((h) => /max/i.test(h));
+
+    // Fallback to simple positional assumptions if header names can't be found.
+    if (minIdx < 0) minIdx = 1;
+    if (mostIdx < 0) mostIdx = 2;
+    if (maxIdx < 0) maxIdx = 3;
+
+    const rows: ForecastRow[] = [];
+
+    for (let i = 1; i < lines.length; i++) {
+      const cols = splitCsvLine(lines[i]).map((c) => c.trim());
+      if (cols.length === 0) continue;
+
+      const timeLabelRaw = cols[dateIdx] ?? "";
+      const timeLabel = timeLabelRaw.replace(/^"|"$/g, "");
+
+      const min = parseMw(cols[minIdx]);
+      const mostLikely = parseMw(cols[mostIdx]);
+      const max = parseMw(cols[maxIdx]);
+
+      // If we don't get any numbers, skip the row.
+      if (min == null && mostLikely == null && max == null) continue;
+
+      rows.push({
+        timeLabel,
+        min,
+        mostLikely,
+        max,
+      });
+    }
+
+    return rows;
+  } catch (err) {
+    console.error(`Error fetching AESO ${kind} 12-hour forecast:`, err);
+    return [];
+  }
 }
 
 /* ---------- page ---------- */
 
 export default async function RenewablesPage() {
-  const [states, csdSnapshot] = await Promise.all([
-    getTodayHourlyStates(),
+  const [csdSnapshot, windForecast, solarForecast] = await Promise.all([
     fetchCsdRenewablesSnapshot(),
+    fetchAesoForecast12h("wind"),
+    fetchAesoForecast12h("solar"),
   ]);
 
-  const summary = summarizeDay(states);
-  const currentHe = getCurrentHeFromSummary(summary);
+  const now = new Date();
+  const abDate = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Edmonton",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(now);
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100">
       <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+        {/* ---------- Header ---------- */}
         <header className="mb-4 space-y-2">
           <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
-            Renewables Forecast
+            Renewables – Live AESO Data
           </h1>
           <p className="max-w-2xl text-sm text-slate-400">
-            Hourly wind and solar forecast bands vs actuals for{" "}
-            <span className="font-mono">{summary.date}</span>. Actuals for the
-            current hour are pulled live from AESO&apos;s{" "}
+            Live Alberta wind and solar data for{" "}
+            <span className="font-mono">{abDate}</span>, pulled directly from
+            AESO reports (no synthetic model). Actuals come from{" "}
             <a
               href={AESO_CSD_URL}
               target="_blank"
@@ -119,14 +242,15 @@ export default async function RenewablesPage() {
             >
               Current Supply &amp; Demand (CSD)
             </a>{" "}
-            report; other hours use the synthetic model.
+            and forecasts come from the AESO 12-hour wind and solar power
+            forecast CSVs.
           </p>
 
-          {/* Live AESO snapshot badge */}
+          {/* Live snapshot badges */}
           <div className="flex flex-wrap gap-2 text-xs">
             <div className="inline-flex items-center rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-emerald-200">
               <span className="mr-2 inline-block h-1.5 w-1.5 rounded-full bg-emerald-400" />
-              Live AESO snapshot (CSD)
+              CSD snapshot (live actuals)
             </div>
             <div className="inline-flex items-center rounded-full border border-slate-700 bg-slate-900/70 px-3 py-1 text-slate-300">
               <span className="mr-1 text-slate-400">Wind:</span>
@@ -140,164 +264,122 @@ export default async function RenewablesPage() {
                 ? `${formatNumber(csdSnapshot.solarMw, 0)} MW`
                 : "unavailable"}
             </div>
-            {currentHe != null && (
-              <div className="inline-flex items-center rounded-full border border-slate-800 bg-slate-900/70 px-3 py-1 text-slate-400">
-                Current HE (Alberta):{" "}
-                <span className="ml-1 font-mono">
-                  {currentHe.toString().padStart(2, "0")}
-                </span>
-              </div>
-            )}
           </div>
         </header>
 
         <NavTabs />
 
+        {/* ---------- Tables ---------- */}
         <section className="mt-4 grid gap-4 lg:grid-cols-2">
-          {/* Solar */}
+          {/* Solar forecast table */}
           <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-4">
             <h2 className="mb-2 text-sm font-semibold tracking-tight">
-              Solar (MW)
+              Solar Forecast (next 12 hours, MW)
             </h2>
             <p className="mb-2 text-[11px] text-slate-400">
-              The <span className="font-semibold">Actual</span> column for the
-              current HE uses live AESO CSD &quot;Solar Generation&quot;.
-              Previous and future hours fall back to the synthetic model.
+              Direct from AESO&apos;s Solar 12-hour forecast CSV. Values are
+              updated roughly every 10 minutes.
             </p>
+
             <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/40">
               <table className="min-w-full text-left text-xs">
                 <thead className="bg-slate-900/80 text-[11px] uppercase tracking-wide text-slate-400">
                   <tr>
-                    <th className="px-3 py-2">HE</th>
-                    <th className="px-3 py-2">Forecast</th>
-                    <th className="px-3 py-2">Actual</th>
-                    <th className="px-3 py-2">Δ (Actual − Fcst)</th>
+                    <th className="px-3 py-2">Time</th>
+                    <th className="px-3 py-2">Min</th>
+                    <th className="px-3 py-2">Most likely</th>
+                    <th className="px-3 py-2">Max</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {states.map((s) => {
-                    // Use live AESO actual for the current HE if available.
-                    const isCurrentHe =
-                      currentHe != null && s.he === currentHe;
-                    const actualSolar =
-                      isCurrentHe && csdSnapshot.solarMw != null
-                        ? csdSnapshot.solarMw
-                        : s.solarActual;
-
-                    const delta = actualSolar - s.solarForecast;
-
-                    return (
+                  {solarForecast.length === 0 ? (
+                    <tr>
+                      <td
+                        className="px-3 py-3 text-[11px] text-slate-400"
+                        colSpan={4}
+                      >
+                        No solar forecast data available right now (could not
+                        load AESO CSV).
+                      </td>
+                    </tr>
+                  ) : (
+                    solarForecast.map((row, idx) => (
                       <tr
-                        key={s.he}
-                        className={
-                          "border-t border-slate-800/60 hover:bg-slate-900/40" +
-                          (isCurrentHe ? " bg-slate-900/60" : "")
-                        }
+                        key={`${row.timeLabel}-${idx}`}
+                        className="border-t border-slate-800/60 hover:bg-slate-900/40"
                       >
                         <td className="px-3 py-2 text-[11px] font-medium text-slate-200">
-                          HE {s.he.toString().padStart(2, "0")}
-                          {isCurrentHe && (
-                            <span className="ml-1 rounded-full bg-emerald-500/20 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-emerald-300">
-                              Live
-                            </span>
-                          )}
+                          {row.timeLabel || "—"}
                         </td>
                         <td className="px-3 py-2 text-[11px] text-slate-300">
-                          {formatNumber(s.solarForecast, 0)}
+                          {formatNumber(row.min, 0)}
                         </td>
                         <td className="px-3 py-2 text-[11px] text-slate-300">
-                          {formatNumber(actualSolar, 0)}
+                          {formatNumber(row.mostLikely, 0)}
                         </td>
-                        <td
-                          className={
-                            "px-3 py-2 text-[11px] " +
-                            (delta > 0
-                              ? "text-emerald-400"
-                              : delta < 0
-                              ? "text-red-400"
-                              : "text-slate-300")
-                          }
-                        >
-                          {delta >= 0 ? "+" : ""}
-                          {formatNumber(delta, 0)}
+                        <td className="px-3 py-2 text-[11px] text-slate-300">
+                          {formatNumber(row.max, 0)}
                         </td>
                       </tr>
-                    );
-                  })}
+                    ))
+                  )}
                 </tbody>
               </table>
             </div>
           </div>
 
-          {/* Wind */}
+          {/* Wind forecast table */}
           <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-4">
             <h2 className="mb-2 text-sm font-semibold tracking-tight">
-              Wind (MW)
+              Wind Forecast (next 12 hours, MW)
             </h2>
             <p className="mb-2 text-[11px] text-slate-400">
-              The <span className="font-semibold">Actual</span> column for the
-              current HE uses live AESO CSD &quot;Wind Generation&quot;.
-              Previous and future hours fall back to the synthetic model.
+              Direct from AESO&apos;s Wind 12-hour forecast CSV. Values are
+              updated roughly every 10 minutes.
             </p>
+
             <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/40">
               <table className="min-w-full text-left text-xs">
                 <thead className="bg-slate-900/80 text-[11px] uppercase tracking-wide text-slate-400">
                   <tr>
-                    <th className="px-3 py-2">HE</th>
-                    <th className="px-3 py-2">Forecast</th>
-                    <th className="px-3 py-2">Actual</th>
-                    <th className="px-3 py-2">Δ (Actual − Fcst)</th>
+                    <th className="px-3 py-2">Time</th>
+                    <th className="px-3 py-2">Min</th>
+                    <th className="px-3 py-2">Most likely</th>
+                    <th className="px-3 py-2">Max</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {states.map((s) => {
-                    const isCurrentHe =
-                      currentHe != null && s.he === currentHe;
-                    const actualWind =
-                      isCurrentHe && csdSnapshot.windMw != null
-                        ? csdSnapshot.windMw
-                        : s.windActual;
-
-                    const delta = actualWind - s.windForecast;
-
-                    return (
+                  {windForecast.length === 0 ? (
+                    <tr>
+                      <td
+                        className="px-3 py-3 text-[11px] text-slate-400"
+                        colSpan={4}
+                      >
+                        No wind forecast data available right now (could not
+                        load AESO CSV).
+                      </td>
+                    </tr>
+                  ) : (
+                    windForecast.map((row, idx) => (
                       <tr
-                        key={s.he}
-                        className={
-                          "border-t border-slate-800/60 hover:bg-slate-900/40" +
-                          (isCurrentHe ? " bg-slate-900/60" : "")
-                        }
+                        key={`${row.timeLabel}-${idx}`}
+                        className="border-t border-slate-800/60 hover:bg-slate-900/40"
                       >
                         <td className="px-3 py-2 text-[11px] font-medium text-slate-200">
-                          HE {s.he.toString().padStart(2, "0")}
-                          {isCurrentHe && (
-                            <span className="ml-1 rounded-full bg-emerald-500/20 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-emerald-300">
-                              Live
-                            </span>
-                          )}
+                          {row.timeLabel || "—"}
                         </td>
                         <td className="px-3 py-2 text-[11px] text-slate-300">
-                          {formatNumber(s.windForecast, 0)}
+                          {formatNumber(row.min, 0)}
                         </td>
                         <td className="px-3 py-2 text-[11px] text-slate-300">
-                          {formatNumber(actualWind, 0)}
+                          {formatNumber(row.mostLikely, 0)}
                         </td>
-                        <td
-                          className={
-                            "px-3 py-2 text-[11px] " +
-                            (delta > 0
-                              ? "text-emerald-400"
-                              : delta < 0
-                              ? "text-red-400"
-                              : "text-slate-300")
-                          }
-                        >
-                          {delta >= 0 ? "+" : ""}
-                          {formatNumber(delta, 0)}
+                        <td className="px-3 py-2 text-[11px] text-slate-300">
+                          {formatNumber(row.max, 0)}
                         </td>
                       </tr>
-                    );
-                  })}
+                    ))
+                  )}
                 </tbody>
               </table>
             </div>
@@ -305,19 +387,11 @@ export default async function RenewablesPage() {
         </section>
 
         <p className="mt-4 text-[11px] text-slate-500">
-          In the full build, you can also wire in AESO&apos;s 12-hour ahead wind
-          and solar forecast CSVs from the{" "}
-          <a
-            href="https://www.aeso.ca/grid/grid-planning/forecasting/wind-and-solar-power-forecasting/"
-            target="_blank"
-            rel="noreferrer"
-            className="underline decoration-slate-500 hover:decoration-slate-300"
-          >
-            Wind and Solar Power Forecasting
-          </a>{" "}
-          page (Wind-12 hour / Solar-12 hour links) to replace the synthetic
-          forecast bands. This page already supports plugging those values into
-          the existing HE-by-HE layout.
+          All values on this page are taken directly from AESO reports. If you
+          see &quot;unavailable&quot; or an empty table, it usually means the
+          AESO endpoints could not be reached or the CSV layout changed – in
+          that case you can open the linked AESO pages above to inspect the raw
+          data.
         </p>
       </div>
     </main>
