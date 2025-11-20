@@ -36,7 +36,9 @@ function approxAlbertaNow() {
   return { nowAb, isoDate, he };
 }
 
-function groupByDate(rows: AesoActualForecastRow[]): Map<string, AesoActualForecastRow[]> {
+function groupByDate(
+  rows: AesoActualForecastRow[]
+): Map<string, AesoActualForecastRow[]> {
   const map = new Map<string, AesoActualForecastRow[]>();
   for (const r of rows) {
     if (!map.has(r.date)) map.set(r.date, []);
@@ -55,53 +57,26 @@ export default async function LoadForecastPage() {
   const byDate = groupByDate(rows);
   const reportDates = Array.from(byDate.keys()).sort();
 
-  const { isoDate: todayAbIso, he: approxHe } = approxAlbertaNow();
+  const { isoDate: todayAbIso } = approxAlbertaNow();
   const hasData = rows.length > 0;
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100">
       <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+        {/* Header with download button */}
         <header className="mb-4 space-y-2">
-          <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
-            Load &amp; Price Forecast
-          </h1>
-          <p className="max-w-2xl text-sm text-slate-400">
-            Pure AESO data from the Actual/Forecast WMRQH report. All dates
-            present in the CSV are shown below, one section per report date.
-            For any hour where AESO has published actuals, the actual
-            columns are populated; otherwise only the forecast columns
-            show values. No synthetic modelling is used on this page.
-          </p>
-        </header>
-
-        <NavTabs />
-
-        {/* Source / debug banner */}
-        <section className="mt-4 rounded-2xl border border-emerald-900 bg-emerald-950/40 px-4 py-3 text-xs text-emerald-100">
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <div className="space-y-1">
-              <div className="inline-flex items-center gap-2 rounded-full bg-emerald-900/70 px-3 py-1 text-[11px] font-medium">
-                <span className="h-2 w-2 rounded-full bg-emerald-400" />
-                <span>SOURCE: AESO ActualForecastWMRQH (CSV)</span>
-              </div>
-              <div className="text-[11px] text-emerald-200/80">
-                Report dates in file:{" "}
-                {debug.reportDates.length
-                  ? debug.reportDates.join(", ")
-                  : "none"}
-                {" · "}
-                HTTP: {debug.httpStatus || "n/a"}
-                {" · "}
-                Parsed rows: {debug.parsedRowCount}
-              </div>
-              <div className="text-[11px] text-emerald-300/80">
-                Current HE (approx, Alberta time):{" "}
-                <span className="font-mono">
-                  HE {approxHe.toString().padStart(2, "0")}
-                </span>{" "}
-                · Today (approx, Alberta):{" "}
-                <span className="font-mono">{todayAbIso}</span>
-              </div>
+            <div>
+              <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
+                Load &amp; Price Forecast
+              </h1>
+              <p className="max-w-2xl text-sm text-slate-400">
+                Pure AESO data from the Actual/Forecast WMRQH report. All dates
+                present in the CSV are shown below, one section per report date.
+                For any hour where AESO has published actuals, the actual
+                columns are populated; otherwise only the forecast columns show
+                values. No synthetic modelling is used on this page.
+              </p>
             </div>
 
             <a
@@ -113,11 +88,9 @@ export default async function LoadForecastPage() {
               Download raw AESO CSV
             </a>
           </div>
-          <p className="mt-2 text-[11px] text-emerald-200/80">
-            The download button opens the original AESO Actual/Forecast WMRQH
-            report in a new tab so you can verify the numbers against this page.
-          </p>
-        </section>
+        </header>
+
+        <NavTabs />
 
         {/* No data / error state */}
         {!hasData && (
@@ -156,9 +129,9 @@ export default async function LoadForecastPage() {
                   </h2>
                   <p className="text-[11px] text-slate-400">
                     Rows below are taken directly from the AESO
-                    Actual/Forecast WMRQH CSV for this date. If a cell
-                    shows &quot;—&quot;, AESO has not published a value yet
-                    for that field (for example, future actuals).
+                    Actual/Forecast WMRQH CSV for this date. If a cell shows
+                    &quot;—&quot;, AESO has not published a value yet for that
+                    field (for example, future actuals).
                   </p>
                 </div>
                 {isToday && (
