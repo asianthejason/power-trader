@@ -78,7 +78,7 @@ type JoinedRow = {
 
 /* ---------- Alberta time + CSD tielines ---------- */
 
-// Approx Alberta now (UTC-7)
+// Approx Alberta now (UTC-7; this is just a rough offset)
 function approxAlbertaNow() {
   const nowUtc = new Date();
   const offsetMs = 7 * 60 * 60 * 1000;
@@ -92,8 +92,8 @@ type IntertiePath = "AB-BC" | "AB-SK" | "AB-MATL";
 type IntertieSnapshot = {
   path: IntertiePath;
   counterparty: string;
-  // Net actual flow from AESO CSD, MW. Positive = exports from Alberta,
-  // negative = imports into Alberta (matches AESO convention).
+  // Net actual flow from AESO CSD, MW.
+  // Positive = net imports into Alberta, negative = net exports from Alberta.
   actualFlowMw: number | null;
 };
 
@@ -179,12 +179,19 @@ async function fetchAesoInterchangeSnapshot(): Promise<IntertieSnapshotResult> {
 /* ---------- NN tielines from nn-history.csv ---------- */
 
 /**
- * Load net tielines (exports - imports) for a specific historical date
+ * Load net tielines for a specific historical date
  * from lib/data/nn-history.csv.
  *
  * Expected header includes:
  *   date,he,actual_pool_price,actual_ail,hour_ahead_pool_price_forecast,
  *   export_bc,export_mt,export_sk,import_bc,import_mt,import_sk
+ *
+ * We define net tielines here with the same sign convention
+ * as Net Actual Interchange from CSD:
+ *
+ *   net = (imports into AB) - (exports from AB)
+ *
+ * So positive = net imports into Alberta, negative = net exports.
  */
 async function loadNnTielinesForDate(
   dateIso: string
@@ -254,8 +261,11 @@ async function loadNnTielinesForDate(
     const importMt = parseNum(cols[importMtIdx]);
     const importSk = parseNum(cols[importSkIdx]);
 
+    // *** KEY FIX: align with CSD sign convention ***
+    // Positive = net imports into Alberta, negative = net exports from Alberta.
     const net =
-      exportBc + exportMt + exportSk - (importBc + importMt + importSk);
+      (importBc + importMt + importSk) -
+      (exportBc + exportMt + exportSk);
 
     map.set(he, Number.isFinite(net) ? net : null);
   }
@@ -455,7 +465,7 @@ export default async function DashboardPage() {
     }
   }
 
-  // Load NN tielines (exports - imports) from nn-history.csv
+  // Load NN tielines from nn-history.csv (positive = imports into AB)
   if (nnResult && nnResult.nnDate) {
     const nnTielinesMap = await loadNnTielinesForDate(nnResult.nnDate);
     for (const row of rows) {
