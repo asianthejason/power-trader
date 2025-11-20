@@ -79,7 +79,7 @@ async function fetchAesoInterchangeSnapshot(): Promise<IntertieSnapshotResult> {
     // System-wide net interchange from SUMMARY table
     const systemNet = extractFlowForLabel(html, "Net Actual Interchange");
 
-    const { nowAb } = approxAbbertaNow();
+    const { nowAb } = approxAlbertaNow();
 
     const rows: IntertieSnapshot[] = [
       {
