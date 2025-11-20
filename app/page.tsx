@@ -3,6 +3,7 @@ import NavTabs from "./components/NavTabs";
 import {
   getTodayHourlyStates,
   getNearestNeighbourStates,
+  getTodayVsNearestNeighbourFromHistory,
   summarizeDay,
   type HourlyState,
 } from "../lib/marketData";
@@ -85,6 +86,10 @@ function sumTielines(s: HourlyState | null | undefined): number | null {
 /**
  * Build joined rows that look like the Excel "Supply Cushion" tab:
  * NN vs real-time values plus hourly / cumulative deltas.
+ *
+ * At this stage the NN side is still fed by getNearestNeighbourStates
+ * (legacy; currently today-only). We later overwrite NN price/load with the
+ * real nearest-neighbour history so those columns match /nearest-neighbour.
  */
 function buildJoinedRows(
   todayStates: HourlyState[],
@@ -165,17 +170,44 @@ function buildJoinedRows(
 }
 
 export default async function DashboardPage() {
-  const [todayStates, nnStates] = await Promise.all([
+  const [todayStates, nnStates, nnResult] = await Promise.all([
     getTodayHourlyStates(),
     getNearestNeighbourStates(),
+    getTodayVsNearestNeighbourFromHistory(),
   ]);
 
   const summary = summarizeDay(todayStates);
   const now = summary.current;
 
   const rows: JoinedRow[] = buildJoinedRows(todayStates, nnStates);
+
+  // If we have a proper nearest-neighbour result, overwrite NN price/load
+  // so the dashboard matches the /nearest-neighbour page.
+  if (nnResult && nnResult.rows?.length) {
+    const nnByHe = new Map(nnResult.rows.map((r) => [r.he, r]));
+
+    for (const row of rows) {
+      const hist = nnByHe.get(row.he);
+      if (!hist) continue;
+
+      // Use NN price from history
+      row.nnPrice = hist.nnPrice;
+
+      // Use NN load and today load from the same dataset
+      row.nnLoad = hist.nnLoad;
+      row.rtLoad = hist.todayLoad ?? row.rtLoad;
+
+      // Recompute deltas based on those values
+      row.dPrice =
+        row.todayPrice != null && row.nnPrice != null
+          ? row.todayPrice - row.nnPrice
+          : null;
+      row.dLoad = hist.deltaLoad;
+    }
+  }
+
   const comparisonDate =
-    rows.length && rows[0].comparisonDate ? rows[0].comparisonDate : "";
+    nnResult && nnResult.nnDate ? nnResult.nnDate : "";
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100">
