@@ -14,6 +14,8 @@ export const revalidate = 60; // regenerate at most once per minute
 
 type PriceSource = "actual" | "forecast" | null;
 
+/* ---------- small helpers ---------- */
+
 function formatNumber(n: number | null | undefined, decimals = 0) {
   if (n == null || Number.isNaN(n)) return "—";
   return n.toLocaleString(undefined, {
@@ -48,6 +50,8 @@ function cushionFlagClass(flag: string | undefined) {
   }
 }
 
+/* ---------- types for joined dashboard rows ---------- */
+
 type JoinedRow = {
   he: number;
   comparisonDate: string | null;
@@ -72,24 +76,201 @@ type JoinedRow = {
   cumulativeSupplyDelta: number | null;
 };
 
+/* ---------- Alberta time + CSD tielines ---------- */
+
+// Approx Alberta now (UTC-7)
+function approxAlbertaNow() {
+  const nowUtc = new Date();
+  const offsetMs = 7 * 60 * 60 * 1000;
+  const nowAb = new Date(nowUtc.getTime() - offsetMs);
+  const isoDate = nowAb.toISOString().slice(0, 10);
+  return { nowAb, isoDate };
+}
+
+type IntertiePath = "AB-BC" | "AB-SK" | "AB-MATL";
+
+type IntertieSnapshot = {
+  path: IntertiePath;
+  counterparty: string;
+  // Net actual flow from AESO CSD, MW. Positive = exports from Alberta,
+  // negative = imports into Alberta (matches AESO convention).
+  actualFlowMw: number | null;
+};
+
+type IntertieSnapshotResult = {
+  asOfAb: Date | null;
+  rows: IntertieSnapshot[];
+  systemNetInterchangeMw: number | null;
+};
+
 /**
- * Sum net intertie flow (MW) on an HourlyState.
- * Positive = exports from Alberta, negative = imports.
+ * Given the raw HTML from CSDReportServlet, find the numeric MW value
+ * that appears in a table row after the given label.
+ *
+ * Example snippet:
+ *   <tr><td>Net Actual Interchange</td><td>-489</td></tr>
  */
-function sumTielines(s: HourlyState | null | undefined): number | null {
-  if (!s || !Array.isArray(s.interties) || s.interties.length === 0) {
-    return null;
-  }
-  const total = s.interties.reduce(
-    (acc, p) => acc + (p.actualFlow ?? 0),
-    0
-  );
-  return Number.isFinite(total) ? total : null;
+function extractFlowForLabel(html: string, label: string): number | null {
+  const idx = html.indexOf(label);
+  if (idx === -1) return null;
+
+  const tail = html.slice(idx);
+  const match = tail.match(/<\/td>\s*<td>\s*(-?\d+)\s*<\/td>/i);
+  if (!match) return null;
+
+  const n = Number(match[1]);
+  return Number.isFinite(n) ? n : null;
 }
 
 /**
- * Build joined rows that look like the Excel "Supply Cushion" tab:
- * NN vs real-time values plus hourly / cumulative deltas.
+ * One-shot snapshot of current net intertie flows from AESO CSD.
+ * This is *not* hourly – we later map the system net interchange
+ * onto the current HE only.
+ */
+async function fetchAesoInterchangeSnapshot(): Promise<IntertieSnapshotResult> {
+  const AESO_CSD_URL =
+    "http://ets.aeso.ca/ets_web/ip/Market/Reports/CSDReportServlet";
+
+  try {
+    const res = await fetch(AESO_CSD_URL);
+
+    if (!res.ok) {
+      console.error("Failed to fetch AESO CSD:", res.status, res.statusText);
+      return { asOfAb: null, rows: [], systemNetInterchangeMw: null };
+    }
+
+    const html = await res.text();
+
+    // Path-level net flows from INTERCHANGE table
+    const bc = extractFlowForLabel(html, "British Columbia");
+    const mt = extractFlowForLabel(html, "Montana");
+    const sk = extractFlowForLabel(html, "Saskatchewan");
+
+    // System-wide net interchange from SUMMARY table
+    const systemNet = extractFlowForLabel(html, "Net Actual Interchange");
+
+    const { nowAb } = approxAlbertaNow();
+
+    const rows: IntertieSnapshot[] = [
+      {
+        path: "AB-BC",
+        counterparty: "British Columbia",
+        actualFlowMw: bc,
+      },
+      {
+        path: "AB-MATL",
+        counterparty: "Montana (MATL)",
+        actualFlowMw: mt,
+      },
+      {
+        path: "AB-SK",
+        counterparty: "Saskatchewan",
+        actualFlowMw: sk,
+      },
+    ];
+
+    return { asOfAb: nowAb, rows, systemNetInterchangeMw: systemNet };
+  } catch (err) {
+    console.error("Error fetching/parsing AESO CSD:", err);
+    return { asOfAb: null, rows: [], systemNetInterchangeMw: null };
+  }
+}
+
+/* ---------- NN tielines from nn-history.csv ---------- */
+
+/**
+ * Load net tielines (exports - imports) for a specific historical date
+ * from lib/data/nn-history.csv.
+ *
+ * Expected header includes:
+ *   date,he,actual_pool_price,actual_ail,hour_ahead_pool_price_forecast,
+ *   export_bc,export_mt,export_sk,import_bc,import_mt,import_sk
+ */
+async function loadNnTielinesForDate(
+  dateIso: string
+): Promise<Map<number, number | null>> {
+  const fs = await import("node:fs/promises");
+  const path = await import("node:path");
+
+  const filePath = path.join(process.cwd(), "lib", "data", "nn-history.csv");
+  const raw = await fs.readFile(filePath, "utf8");
+
+  const lines = raw
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+
+  const map = new Map<number, number | null>();
+  if (lines.length <= 1) return map;
+
+  const headers = lines[0].split(",").map((h) => h.trim());
+  const idx = (name: string) => headers.indexOf(name);
+
+  const dateIdx = idx("date");
+  const heIdx = idx("he");
+  const exportBcIdx = idx("export_bc");
+  const exportMtIdx = idx("export_mt");
+  const exportSkIdx = idx("export_sk");
+  const importBcIdx = idx("import_bc");
+  const importMtIdx = idx("import_mt");
+  const importSkIdx = idx("import_sk");
+
+  if (
+    dateIdx === -1 ||
+    heIdx === -1 ||
+    exportBcIdx === -1 ||
+    exportMtIdx === -1 ||
+    exportSkIdx === -1 ||
+    importBcIdx === -1 ||
+    importMtIdx === -1 ||
+    importSkIdx === -1
+  ) {
+    console.error(
+      "nn-history.csv is missing one or more tieline columns; cannot build NN tielines."
+    );
+    return map;
+  }
+
+  const parseNum = (s: string | undefined): number => {
+    if (!s) return 0;
+    const trimmed = s.trim();
+    if (!trimmed || trimmed === "-" || trimmed === "--") return 0;
+    const n = Number(trimmed);
+    return Number.isFinite(n) ? n : 0;
+  };
+
+  for (let i = 1; i < lines.length; i++) {
+    const cols = lines[i].split(",");
+    const rowDate = cols[dateIdx]?.trim();
+    if (rowDate !== dateIso) continue;
+
+    const he = Number(cols[heIdx]);
+    if (!Number.isFinite(he)) continue;
+
+    const exportBc = parseNum(cols[exportBcIdx]);
+    const exportMt = parseNum(cols[exportMtIdx]);
+    const exportSk = parseNum(cols[exportSkIdx]);
+    const importBc = parseNum(cols[importBcIdx]);
+    const importMt = parseNum(cols[importMtIdx]);
+    const importSk = parseNum(cols[importSkIdx]);
+
+    const net =
+      exportBc + exportMt + exportSk - (importBc + importMt + importSk);
+
+    map.set(he, Number.isFinite(net) ? net : null);
+  }
+
+  return map;
+}
+
+/* ---------- build main joined rows (price/load/wind/solar) ---------- */
+
+/**
+ * Build joined rows that look like the Excel "Supply Cushion" tab.
+ *
+ * NOTE: Tielines are *not* filled here – we fill NN tielines from
+ * nn-history.csv and today tielines from AESO CSD later so that
+ * everything shown is real AESO data, not synthetic.
  */
 function buildJoinedRows(
   todayStates: HourlyState[],
@@ -112,17 +293,11 @@ function buildJoinedRows(
     const dPrice =
       todayPrice != null && nnPrice != null ? todayPrice - nnPrice : null;
 
+    // Load: today vs NN (later we override with NN history where available)
     const nnLoad = nn?.actualLoad ?? null;
     const rtLoad = today.actualLoad ?? null;
     const dLoad =
       nnLoad != null && rtLoad != null ? rtLoad - nnLoad : null;
-
-    const nnTielines = sumTielines(nn);
-    const rtTielines = sumTielines(today);
-    const dTielines =
-      nnTielines != null && rtTielines != null
-        ? rtTielines - nnTielines
-        : null;
 
     const nnWind = nn?.windActual ?? null;
     const rtWind = today.windActual ?? null;
@@ -153,9 +328,9 @@ function buildJoinedRows(
       nnLoad,
       rtLoad,
       dLoad,
-      nnTielines,
-      rtTielines,
-      dTielines,
+      nnTielines: null,
+      rtTielines: null,
+      dTielines: null,
       nnWind,
       rtWind,
       dWind,
@@ -168,6 +343,8 @@ function buildJoinedRows(
     };
   });
 }
+
+/* ---------- WMRQH “actual vs forecast” source maps ---------- */
 
 /**
  * For the “today” side, figure out whether each HE’s load/price
@@ -220,13 +397,16 @@ function buildSourceMapsForToday(
   return { priceSourceByHe, loadSourceByHe, priceValueByHe };
 }
 
+/* ---------- main page ---------- */
+
 export default async function DashboardPage() {
-  const [{ rows: aesoRows }, todayStates, nnStates, nnResult] =
+  const [{ rows: aesoRows }, todayStates, nnStates, nnResult, csdSnapshot] =
     await Promise.all([
       fetchAesoActualForecastRows(),
       getTodayHourlyStates(),
       getNearestNeighbourStates(),
       getTodayVsNearestNeighbourFromHistory(),
+      fetchAesoInterchangeSnapshot(),
     ]);
 
   const summary = summarizeDay(todayStates);
@@ -250,7 +430,7 @@ export default async function DashboardPage() {
       row.nnLoad = hist.nnLoad;
       row.rtLoad = hist.todayLoad ?? row.rtLoad;
 
-      // Recompute deltas based on those values
+      // Recompute price/load deltas based on those values
       row.dPrice =
         row.todayPrice != null && row.nnPrice != null
           ? row.todayPrice - row.nnPrice
@@ -275,6 +455,33 @@ export default async function DashboardPage() {
     }
   }
 
+  // Load NN tielines (exports - imports) from nn-history.csv
+  if (nnResult && nnResult.nnDate) {
+    const nnTielinesMap = await loadNnTielinesForDate(nnResult.nnDate);
+    for (const row of rows) {
+      const val = nnTielinesMap.get(row.he);
+      row.nnTielines = val != null ? val : null;
+    }
+  }
+
+  // Map today’s *current* net interchange from CSD onto the current HE row.
+  const currentHe = now?.he;
+  if (currentHe && csdSnapshot.systemNetInterchangeMw != null) {
+    const target = rows.find((r) => r.he === currentHe);
+    if (target) {
+      target.rtTielines = csdSnapshot.systemNetInterchangeMw;
+    }
+  }
+
+  // After NN + today tielines are filled, compute Δ Tielines
+  for (const row of rows) {
+    if (row.nnTielines != null && row.rtTielines != null) {
+      row.dTielines = row.rtTielines - row.nnTielines;
+    } else {
+      row.dTielines = null;
+    }
+  }
+
   const comparisonDate =
     nnResult && nnResult.nnDate ? nnResult.nnDate : "";
 
@@ -287,8 +494,8 @@ export default async function DashboardPage() {
           </h1>
           <p className="mt-1 max-w-2xl text-sm text-slate-400">
             Supply cushion and nearest-neighbour view built from AESO
-            Actual/Forecast WMRQH and your analogue day selection. No
-            synthetic model data is used on this page.
+            Actual/Forecast WMRQH, historical NN curves, and live CSD
+            interchange. No synthetic model data is used on this page.
           </p>
         </header>
 
