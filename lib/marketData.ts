@@ -107,7 +107,7 @@ export type AesoForecastDebug = {
 
 // Parse "11/19/2025 01" -> { dateIso: "2025-11-19", he: 1 }
 function parseMdyHe(field: string): { dateIso: string; he: number } | null {
-  const m = field.match(/^(\d{1,2})\/(\\d{1,2})\/(\d{4})\s+(\d{1,2})$/);
+  const m = field.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2})$/);
   if (!m) return null;
   const month = Number(m[1]);
   const day = Number(m[2]);
@@ -601,24 +601,33 @@ async function loadHistoricalNnDays(): Promise<NnDay[]> {
   return days;
 }
 
-/* ---------- distance helpers ---------- */
-
 /**
- * Load-only distance (normalised MSE of AIL).
- * Used for the first-stage filter.
+ * Combined distance metric:
+ *
+ * - We want both load *and* price to be close.
+ * - We normalise by today's load and price ranges so MW and $ are
+ *   comparable.
+ * - We give price a slightly higher weight so huge price mismatches are
+ *   penalised more strongly.
  */
-function loadDistance(today: NnDay, hist: NnDay): number {
+function combinedDistance(today: NnDay, hist: NnDay): number {
   const todayMap = new Map(today.hours.map((h) => [h.he, h]));
   const histMap = new Map(hist.hours.map((h) => [h.he, h]));
 
-  // Range from today's curve so magnitudes are comparable across days.
+  // Compute ranges from today's curve
   let minLoad = Infinity;
   let maxLoad = -Infinity;
+  let minPrice = Infinity;
+  let maxPrice = -Infinity;
 
   for (const h of today.hours) {
     if (h.load != null) {
       if (h.load < minLoad) minLoad = h.load;
       if (h.load > maxLoad) maxLoad = h.load;
+    }
+    if (h.price != null) {
+      if (h.price < minPrice) minPrice = h.price;
+      if (h.price > maxPrice) maxPrice = h.price;
     }
   }
 
@@ -626,6 +635,13 @@ function loadDistance(today: NnDay, hist: NnDay): number {
     Number.isFinite(minLoad) && Number.isFinite(maxLoad) && maxLoad > minLoad
       ? maxLoad - minLoad
       : 1;
+  const priceRange =
+    Number.isFinite(minPrice) && Number.isFinite(maxPrice) && maxPrice > minPrice
+      ? maxPrice - minPrice
+      : 1;
+
+  const LOAD_WEIGHT = 1.0;
+  const PRICE_WEIGHT = 1.5; // bias toward matching price more closely
 
   let sum = 0;
   let count = 0;
@@ -634,11 +650,18 @@ function loadDistance(today: NnDay, hist: NnDay): number {
     const t = todayMap.get(he);
     const h = histMap.get(he);
     if (!t || !h) continue;
-    if (t.load == null || h.load == null) continue;
 
-    const norm = (t.load - h.load) / loadRange;
-    sum += norm * norm;
-    count++;
+    if (t.load != null && h.load != null) {
+      const norm = (t.load - h.load) / loadRange;
+      sum += LOAD_WEIGHT * norm * norm;
+      count++;
+    }
+
+    if (t.price != null && h.price != null) {
+      const norm = (t.price - h.price) / priceRange;
+      sum += PRICE_WEIGHT * norm * norm;
+      count++;
+    }
   }
 
   if (count === 0) return Number.POSITIVE_INFINITY;
@@ -646,56 +669,11 @@ function loadDistance(today: NnDay, hist: NnDay): number {
 }
 
 /**
- * Price-only distance (normalised MSE of price).
- * We weight hours where today's price is actual more heavily than forecast.
- */
-function priceDistance(today: NnDay, hist: NnDay): number {
-  const todayMap = new Map(today.hours.map((h) => [h.he, h]));
-  const histMap = new Map(hist.hours.map((h) => [h.he, h]));
-
-  // Range from today's price curve.
-  let minPrice = Infinity;
-  let maxPrice = -Infinity;
-
-  for (const h of today.hours) {
-    if (h.price != null) {
-      if (h.price < minPrice) minPrice = h.price;
-      if (h.price > maxPrice) maxPrice = h.price;
-    }
-  }
-
-  const priceRange =
-    Number.isFinite(minPrice) && Number.isFinite(maxPrice) && maxPrice > minPrice
-      ? maxPrice - minPrice
-      : 1;
-
-  let sum = 0;
-  let weightSum = 0;
-
-  for (let he = 1; he <= 24; he++) {
-    const t = todayMap.get(he);
-    const h = histMap.get(he);
-    if (!t || !h) continue;
-    if (t.price == null || h.price == null) continue;
-
-    const w = t.priceSource === "actual" ? 2 : 1; // emphasise actual hours
-    const norm = (t.price - h.price) / priceRange;
-
-    sum += w * norm * norm;
-    weightSum += w;
-  }
-
-  if (weightSum === 0) return Number.POSITIVE_INFINITY;
-  return sum / weightSum;
-}
-
-/**
- * Nearest-neighbour selection using a two-stage approach:
+ * Nearest-neighbour selection using:
+ *  - "today" from live AESO WMRQH (best-known price/load)
+ *  - history from lib/data/nn-history.csv (actual pool price + AIL)
  *
- *  1. Rank all historical days by **loadDistance** (shape of AIL).
- *     Take the top K load matches (K ~ 50).
- *  2. Within that subset, pick the day with the smallest **priceDistance**,
- *     with extra weight on hours where today's price is actual.
+ * Returns data in the shape the /nearest-neighbour page expects.
  */
 export async function getTodayVsNearestNeighbourFromHistory(): Promise<NearestNeighbourResult | null> {
   const today = await buildTodayCurveFromWmrqh();
@@ -708,37 +686,19 @@ export async function getTodayVsNearestNeighbourFromHistory(): Promise<NearestNe
   const candidates = history.filter((d) => d.date !== today.date);
   if (!candidates.length) return null;
 
-  // Stage 1: sort by load distance and keep top K
-  const withLoad = candidates
-    .map((day) => ({
-      day,
-      loadDist: loadDistance(today, day),
-    }))
-    .filter((x) => Number.isFinite(x.loadDist))
-    .sort((a, b) => a.loadDist - b.loadDist);
-
-  if (!withLoad.length) return null;
-
-  const K = Math.min(50, withLoad.length);
-  const loadTopK = withLoad.slice(0, K).map((x) => x.day);
-
-  // Stage 2: pick best price match within loadTopK
   let best: NnDay | null = null;
-  let bestPriceDist = Number.POSITIVE_INFINITY;
+  let bestDist = Number.POSITIVE_INFINITY;
 
-  for (const day of loadTopK) {
-    const pd = priceDistance(today, day);
-    if (!Number.isFinite(pd)) continue;
-    if (pd < bestPriceDist) {
-      bestPriceDist = pd;
+  for (const day of candidates) {
+    const dist = combinedDistance(today, day);
+    if (!Number.isFinite(dist)) continue;
+    if (dist < bestDist) {
+      bestDist = dist;
       best = day;
     }
   }
 
-  // Fallback: if all price distances are bad/NaN, just use best load match
-  if (!best) {
-    best = withLoad[0].day;
-  }
+  if (!best) return null;
 
   const todayMap = new Map(today.hours.map((h) => [h.he, h]));
   const nnMap = new Map(best.hours.map((h) => [h.he, h]));
