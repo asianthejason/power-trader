@@ -3,7 +3,7 @@
 import NavTabs from "../components/NavTabs";
 
 // Revalidate every minute – this page is a thin wrapper around AESO's
-// real-time Current Supply Demand (CSD) report, so we keep it reasonably fresh.
+// real-time reports, so we keep it reasonably fresh.
 export const revalidate = 60;
 
 /* ---------- helpers ---------- */
@@ -19,12 +19,14 @@ function formatNumber(
   });
 }
 
-// Rough "now" in Alberta (UTC-7). Same idea as your load-forecast page.
+// Rough "now" in Alberta (America/Edmonton).
 function approxAlbertaNow() {
-  const nowUtc = new Date();
-  const nowAb = new Date(nowUtc.getTime() - 7 * 60 * 60 * 1000); // UTC-7
-  const isoDate = nowAb.toISOString().slice(0, 10);
-  return { nowAb, isoDate };
+  const now = new Date();
+  const ab = new Date(
+    now.toLocaleString("en-CA", { timeZone: "America/Edmonton" })
+  );
+  const isoDate = ab.toISOString().slice(0, 10); // YYYY-MM-DD
+  return { nowAb: ab, isoDate };
 }
 
 type IntertiePath = "AB-BC" | "AB-SK" | "AB-MATL";
@@ -132,14 +134,177 @@ function extractFlowForLabel(html: string, label: string): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+/* ---------- ATC / capability (api/v2/interchange) ---------- */
+
+type HourlyAtcRow = {
+  he: number;
+  bcImportCap: number | null;
+  bcExportCap: number | null;
+  matlImportCap: number | null;
+  matlExportCap: number | null;
+  skImportCap: number | null;
+  skExportCap: number | null;
+  systemImportCap: number | null;
+  systemExportCap: number | null;
+  bcMatlImportCap: number | null;
+  bcMatlExportCap: number | null;
+};
+
+type AesoAllocation = {
+  date?: string;
+  he?: string;
+  name?: string;
+  import?: { atc?: number | null } | null;
+  export?: { atc?: number | null } | null;
+};
+
+type AesoInterchangeJson = {
+  message?: string;
+  responseCode?: string;
+  localTimestamp?: string;
+  return?: {
+    [key: string]:
+      | {
+          Allocations?: AesoAllocation[];
+          // plus other fields we ignore
+        }
+      | undefined;
+  };
+};
+
+/**
+ * Pull today’s ATC capability curves from AESO’s
+ *   https://itc.aeso.ca/itc/public/api/v2/interchange
+ *
+ * We request dataType=ATC and then collapse the JSON into one row per HE
+ * with BC / MATL / SK / System / BC+MATL capability.
+ *
+ * All numbers are straight from AESO; no synthetic modelling.
+ */
+async function fetchTodayAtcRows(): Promise<{
+  date: string;
+  rows: HourlyAtcRow[];
+}> {
+  const { isoDate } = approxAlbertaNow();
+  const dateParam = isoDate.replace(/-/g, "");
+
+  const url = new URL(
+    "https://itc.aeso.ca/itc/public/api/v2/interchange"
+  );
+  url.searchParams.set("startDate", dateParam);
+  url.searchParams.set("endDate", dateParam);
+  url.searchParams.set("startHE", "1");
+  url.searchParams.set("endHE", "24");
+  url.searchParams.set("Accept", "application/json");
+  url.searchParams.set("version", "false");
+  url.searchParams.set("dataType", "ATC");
+
+  const blankRows: Record<number, HourlyAtcRow> = {};
+  for (let he = 1; he <= 24; he++) {
+    blankRows[he] = {
+      he,
+      bcImportCap: null,
+      bcExportCap: null,
+      matlImportCap: null,
+      matlExportCap: null,
+      skImportCap: null,
+      skExportCap: null,
+      systemImportCap: null,
+      systemExportCap: null,
+      bcMatlImportCap: null,
+      bcMatlExportCap: null,
+    };
+  }
+
+  try {
+    const res = await fetch(url.toString(), {
+      cache: "no-store",
+      next: { revalidate: 0 },
+    });
+
+    if (!res.ok) {
+      console.error("Failed to fetch AESO ATC JSON:", res.statusText);
+      return { date: isoDate, rows: Object.values(blankRows) };
+    }
+
+    const data = (await res.json()) as AesoInterchangeJson;
+    const ret = data.return || {};
+
+    const flowgateKeys = [
+      "BcIntertie",
+      "SkIntertie",
+      "MatlIntertie",
+      "SystemlFlowgate",
+      "BcMatlFlowgate",
+    ] as const;
+
+    for (const key of flowgateKeys) {
+      const section = ret[key];
+      if (!section || !Array.isArray(section.Allocations)) continue;
+
+      for (const alloc of section.Allocations) {
+        if (!alloc || alloc.date !== isoDate) continue;
+        const heNum = Number(alloc.he);
+        if (!Number.isFinite(heNum) || heNum < 1 || heNum > 24) continue;
+
+        const row = blankRows[heNum];
+        const importAtc =
+          alloc.import && typeof alloc.import.atc === "number"
+            ? alloc.import.atc
+            : null;
+        const exportAtc =
+          alloc.export && typeof alloc.export.atc === "number"
+            ? alloc.export.atc
+            : null;
+
+        switch (key) {
+          case "BcIntertie":
+            row.bcImportCap = importAtc;
+            row.bcExportCap = exportAtc;
+            break;
+          case "SkIntertie":
+            row.skImportCap = importAtc;
+            row.skExportCap = exportAtc;
+            break;
+          case "MatlIntertie":
+            row.matlImportCap = importAtc;
+            row.matlExportCap = exportAtc;
+            break;
+          case "SystemlFlowgate":
+            row.systemImportCap = importAtc;
+            row.systemExportCap = exportAtc;
+            break;
+          case "BcMatlFlowgate":
+            row.bcMatlImportCap = importAtc;
+            row.bcMatlExportCap = exportAtc;
+            break;
+        }
+      }
+    }
+
+    return {
+      date: isoDate,
+      rows: Object.values(blankRows).sort((a, b) => a.he - b.he),
+    };
+  } catch (err) {
+    console.error("Error fetching/parsing AESO ATC JSON:", err);
+    return { date: isoDate, rows: Object.values(blankRows) };
+  }
+}
+
 /* ---------- page ---------- */
 
 export default async function IntertiesPage() {
-  const { asOfAb, rows, systemNetInterchangeMw } =
-    await fetchAesoInterchangeSnapshot();
+  const [
+    { asOfAb, rows: pathRows, systemNetInterchangeMw },
+    { date: atcDate, rows: atcRows },
+  ] = await Promise.all([
+    fetchAesoInterchangeSnapshot(),
+    fetchTodayAtcRows(),
+  ]);
 
-  const hasPathData = rows.some((r) => r.actualFlowMw != null);
-  const sumOfPathsMw = rows.reduce((acc, r) => {
+  const hasPathData = pathRows.some((r) => r.actualFlowMw != null);
+  const sumOfPathsMw = pathRows.reduce((acc, r) => {
     if (r.actualFlowMw == null) return acc;
     return acc + r.actualFlowMw;
   }, 0);
@@ -148,6 +313,22 @@ export default async function IntertiesPage() {
     systemNetInterchangeMw != null && hasPathData
       ? systemNetInterchangeMw - sumOfPathsMw
       : null;
+
+  const hasAnyAtc =
+    atcRows.length > 0 &&
+    atcRows.some(
+      (r) =>
+        r.bcImportCap != null ||
+        r.bcExportCap != null ||
+        r.matlImportCap != null ||
+        r.matlExportCap != null ||
+        r.skImportCap != null ||
+        r.skExportCap != null ||
+        r.systemImportCap != null ||
+        r.systemExportCap != null ||
+        r.bcMatlImportCap != null ||
+        r.bcMatlExportCap != null
+    );
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100">
@@ -160,8 +341,9 @@ export default async function IntertiesPage() {
                 Interties
               </h1>
               <p className="max-w-2xl text-sm text-slate-400">
-                Real-time net flows on the Alberta interties, pulled directly
-                from AESO&apos;s Current Supply Demand report. Positive values
+                Real-time net flows and hourly transfer capability on the
+                Alberta interties, pulled directly from AESO&apos;s Current
+                Supply Demand report and Interchange ATC API. Positive values
                 mean Alberta is exporting; negative values mean Alberta is
                 importing. No synthetic modelling is used on this page.
               </p>
@@ -170,7 +352,7 @@ export default async function IntertiesPage() {
             <div className="flex flex-col items-start gap-1 text-[11px] text-slate-400 sm:items-end">
               <span className="inline-flex items-center rounded-full border border-slate-700 bg-slate-900/70 px-2 py-0.5">
                 <span className="mr-1.5 h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                Live snapshot from AESO CSD
+                Live snapshot from AESO CSD / ATC
               </span>
               {asOfAb && (
                 <span className="font-mono">
@@ -238,7 +420,7 @@ export default async function IntertiesPage() {
           </div>
         </section>
 
-        {/* Path table */}
+        {/* Path net flow table */}
         <section className="rounded-2xl border border-slate-800 bg-slate-900/80 p-4">
           <div className="mb-3 flex items-baseline justify-between gap-2">
             <div>
@@ -250,7 +432,7 @@ export default async function IntertiesPage() {
                 table in AESO&apos;s Current Supply Demand report. To build a
                 full HE-by-HE history with Import/Export ATC and scheduled
                 volumes, you&apos;ll wire this page to AESO&apos;s Interchange
-                Capability / ATC APIs and your own persisted time series.
+                capability APIs and your own persisted time series.
               </p>
             </div>
           </div>
@@ -267,7 +449,7 @@ export default async function IntertiesPage() {
                 </tr>
               </thead>
               <tbody>
-                {rows.map((row) => {
+                {pathRows.map((row) => {
                   const v = row.actualFlowMw;
                   let direction: string = "—";
                   if (v != null) {
@@ -302,21 +484,21 @@ export default async function IntertiesPage() {
                   );
                 })}
 
-                {!rows.length && (
+                {!pathRows.length && (
                   <tr>
                     <td
                       className="px-3 py-4 text-center text-[11px] text-slate-500"
                       colSpan={5}
                     >
-                      Could not fetch intertie data from AESO right now.
-                      This can happen when the CSD page is temporarily
-                      unavailable. No synthetic fallback is used – refresh
-                      later to try again.
+                      Could not fetch intertie data from AESO right now. This
+                      can happen when the CSD page is temporarily unavailable.
+                      No synthetic fallback is used – refresh later to try
+                      again.
                     </td>
                   </tr>
                 )}
 
-                {rows.length > 0 && !hasPathData && (
+                {pathRows.length > 0 && !hasPathData && (
                   <tr>
                     <td
                       className="px-3 py-3 text-center text-[11px] text-amber-400/90"
@@ -335,11 +517,109 @@ export default async function IntertiesPage() {
           </div>
 
           <p className="mt-2 text-[11px] text-slate-500">
-            Data source: AESO Current Supply Demand Report (CSD). To add Import
-            / Export ATC and scheduled flows per HE, connect to AESO&apos;s
-            ATC / Interchange Capability APIs or the ATC public report at
-            itc.aeso.ca from your backend and join those series to your own
-            persisted CSD snapshots.
+            Data source: AESO Current Supply Demand Report (CSD).
+          </p>
+        </section>
+
+        {/* Hour-by-hour ATC / capability table */}
+        <section className="mt-6 rounded-2xl border border-slate-800 bg-slate-900/80 p-4">
+          <div className="mb-3 flex items-baseline justify-between gap-2">
+            <div>
+              <h2 className="text-sm font-semibold tracking-tight">
+                Today&apos;s Intertie ATC by Hour
+              </h2>
+              <p className="text-[11px] text-slate-400">
+                Hour-ending capabilities from AESO&apos;s Interchange ATC API
+                (dataType=ATC) for {atcDate}. Import / export ATC are shown in
+                MW for each path and for the combined BC+MATL flowgate and
+                provincial system.
+              </p>
+            </div>
+          </div>
+
+          <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/40">
+            <table className="min-w-full text-left text-xs">
+              <thead className="bg-slate-900/80 text-[11px] uppercase tracking-wide text-slate-400">
+                <tr>
+                  <th className="px-3 py-2">HE</th>
+                  <th className="px-3 py-2">BC Import ATC</th>
+                  <th className="px-3 py-2">BC Export ATC</th>
+                  <th className="px-3 py-2">MATL Import ATC</th>
+                  <th className="px-3 py-2">MATL Export ATC</th>
+                  <th className="px-3 py-2">SK Import ATC</th>
+                  <th className="px-3 py-2">SK Export ATC</th>
+                  <th className="px-3 py-2">BC+MATL Import ATC</th>
+                  <th className="px-3 py-2">BC+MATL Export ATC</th>
+                  <th className="px-3 py-2">System Import ATC</th>
+                  <th className="px-3 py-2">System Export ATC</th>
+                </tr>
+              </thead>
+              <tbody>
+                {hasAnyAtc ? (
+                  atcRows.map((r) => (
+                    <tr
+                      key={r.he}
+                      className="border-t border-slate-800/60 hover:bg-slate-900/40"
+                    >
+                      <td className="px-3 py-2 text-[11px] font-medium text-slate-200">
+                        HE {r.he.toString().padStart(2, "0")}
+                      </td>
+                      <td className="px-3 py-2 text-[11px] text-slate-300">
+                        {formatNumber(r.bcImportCap, 0)}
+                      </td>
+                      <td className="px-3 py-2 text-[11px] text-slate-300">
+                        {formatNumber(r.bcExportCap, 0)}
+                      </td>
+                      <td className="px-3 py-2 text-[11px] text-slate-300">
+                        {formatNumber(r.matlImportCap, 0)}
+                      </td>
+                      <td className="px-3 py-2 text-[11px] text-slate-300">
+                        {formatNumber(r.matlExportCap, 0)}
+                      </td>
+                      <td className="px-3 py-2 text-[11px] text-slate-300">
+                        {formatNumber(r.skImportCap, 0)}
+                      </td>
+                      <td className="px-3 py-2 text-[11px] text-slate-300">
+                        {formatNumber(r.skExportCap, 0)}
+                      </td>
+                      <td className="px-3 py-2 text-[11px] text-slate-300">
+                        {formatNumber(r.bcMatlImportCap, 0)}
+                      </td>
+                      <td className="px-3 py-2 text-[11px] text-slate-300">
+                        {formatNumber(r.bcMatlExportCap, 0)}
+                      </td>
+                      <td className="px-3 py-2 text-[11px] text-slate-300">
+                        {formatNumber(r.systemImportCap, 0)}
+                      </td>
+                      <td className="px-3 py-2 text-[11px] text-slate-300">
+                        {formatNumber(r.systemExportCap, 0)}
+                      </td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td
+                      className="px-3 py-4 text-center text-[11px] text-slate-500"
+                      colSpan={11}
+                    >
+                      Could not fetch ATC capability data from AESO&apos;s
+                      Interchange API right now. No synthetic fallback is used –
+                      refresh later to try again.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <p className="mt-2 text-[11px] text-slate-500">
+            Data source: AESO Interchange ATC API
+            (itc.aeso.ca/itc/public/api/v2/interchange, dataType=ATC). These are
+            the same curves that back your Excel &quot;Provincial Available
+            Transfer Capacity&quot; sheet – you can append additional derived
+            columns (TRM, expected provincial flow, &quot;we can&quot; MW, etc.)
+            in your own model or a future backend job without introducing
+            synthetic inputs.
           </p>
         </section>
       </div>
