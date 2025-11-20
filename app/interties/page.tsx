@@ -1,10 +1,10 @@
-// app/interties/page.tsx
+// src/app/interties/page.tsx
 
 import NavTabs from "../components/NavTabs";
+import AutoRefresh from "./AutoRefresh";
 
-// Revalidate every minute – this page is a thin wrapper around AESO's
-// real-time reports, so we keep it reasonably fresh.
-export const revalidate = 60;
+// Revalidate every 30 seconds – matches the client-side refresh interval.
+export const revalidate = 30;
 
 /* ---------- helpers ---------- */
 
@@ -19,8 +19,7 @@ function formatNumber(
   });
 }
 
-// Approximate "now" in Alberta as UTC-7. This is what you used elsewhere
-// and it avoids the Invalid Date issues from locale-based parsing.
+// Approximate "now" in Alberta as UTC-7.
 function approxAlbertaNow() {
   const nowUtc = new Date();
   const offsetMs = 7 * 60 * 60 * 1000; // 7 hours
@@ -80,7 +79,7 @@ async function fetchAesoInterchangeSnapshot(): Promise<IntertieSnapshotResult> {
     // System-wide net interchange from SUMMARY table
     const systemNet = extractFlowForLabel(html, "Net Actual Interchange");
 
-    const { nowAb } = approxAlbertaNow();
+    const { nowAb } = approxAbbertaNow();
 
     const rows: IntertieSnapshot[] = [
       {
@@ -326,6 +325,9 @@ export default async function IntertiesPage() {
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100">
+      {/* client-side auto-refresh every 30s */}
+      <AutoRefresh intervalMs={30000} />
+
       <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
         {/* Header */}
         <header className="mb-4 space-y-2">
