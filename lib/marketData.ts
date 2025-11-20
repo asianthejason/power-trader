@@ -411,10 +411,13 @@ export function summarizeDay(states: HourlyState[]): DailySummary {
 /*  Nearest-neighbour (today vs historical AESO data)                 */
 /* ------------------------------------------------------------------ */
 
+type PriceSource = "actual" | "forecast" | null;
+
 type NnHour = {
   he: number;
   price: number | null;
   load: number | null;
+  priceSource: PriceSource; // for "today" we label actual vs forecast
 };
 
 type NnDay = {
@@ -425,6 +428,7 @@ type NnDay = {
 export type NearestNeighbourRow = {
   he: number;
   todayPrice: number | null;
+  todayPriceSource: PriceSource;
   nnPrice: number | null;
   deltaPrice: number | null;
   todayLoad: number | null;
@@ -438,15 +442,6 @@ export type NearestNeighbourResult = {
   rows: NearestNeighbourRow[];
 };
 
-// Best-known price/load for a single WMRQH row.
-function bestKnownPrice(r: AesoActualForecastRow): number | null {
-  return r.actualPoolPrice ?? r.forecastPoolPrice ?? null;
-}
-
-function bestKnownLoad(r: AesoActualForecastRow): number | null {
-  return r.actualAil ?? r.forecastAil ?? null;
-}
-
 // Approx Alberta now (UTC-7)
 function approxAlbertaNow(): Date {
   const nowUtc = new Date();
@@ -459,7 +454,8 @@ function toDateKey(d: Date): string {
 
 /**
  * Build today's curve (price + load by HE) from live AESO WMRQH,
- * using actuals where published and forecasts elsewhere.
+ * using actuals where published and forecasts elsewhere. We also tag
+ * each HE with whether price is "actual" or "forecast".
  */
 async function buildTodayCurveFromWmrqh(): Promise<NnDay | null> {
   const { rows } = await fetchAesoActualForecastRows();
@@ -483,18 +479,35 @@ async function buildTodayCurveFromWmrqh(): Promise<NnDay | null> {
   const byHe = new Map<number, NnHour>();
 
   for (const r of todaysRows) {
-    const price = bestKnownPrice(r);
-    const load = bestKnownLoad(r);
+    let price: number | null = null;
+    let priceSource: PriceSource = null;
+
+    if (r.actualPoolPrice != null) {
+      price = r.actualPoolPrice;
+      priceSource = "actual";
+    } else if (r.forecastPoolPrice != null) {
+      price = r.forecastPoolPrice;
+      priceSource = "forecast";
+    }
+
+    const load = r.actualAil ?? r.forecastAil ?? null;
+
     byHe.set(r.he, {
       he: r.he,
       price,
       load,
+      priceSource,
     });
   }
 
   const hours: NnHour[] = [];
   for (let he = 1; he <= 24; he++) {
-    const h = byHe.get(he) ?? { he, price: null, load: null };
+    const h = byHe.get(he) ?? {
+      he,
+      price: null,
+      load: null,
+      priceSource: null as PriceSource,
+    };
     hours.push(h);
   }
 
@@ -571,7 +584,7 @@ async function loadHistoricalNnDays(): Promise<NnDay[]> {
     const load = parseNum(cols[loadIdx]);
 
     const list = byDate.get(date) ?? [];
-    list.push({ he, price, load });
+    list.push({ he, price, load, priceSource: null });
     byDate.set(date, list);
   }
 
@@ -589,25 +602,66 @@ async function loadHistoricalNnDays(): Promise<NnDay[]> {
 }
 
 /**
- * Simple distance metric: sum of squared differences of load (AIL) across
- * hours where both days have non-null load. Lower = closer.
+ * Combined distance metric:
+ *
+ * - We want both load *and* price to be close.
+ * - We normalise by today's load and price ranges so MW and $ are
+ *   comparable.
+ * - We give price a slightly higher weight so huge price mismatches are
+ *   penalised more strongly.
  */
-function loadShapeDistance(a: NnDay, b: NnDay): number {
-  const aMap = new Map(a.hours.map((h) => [h.he, h]));
-  const bMap = new Map(b.hours.map((h) => [h.he, h]));
+function combinedDistance(today: NnDay, hist: NnDay): number {
+  const todayMap = new Map(today.hours.map((h) => [h.he, h]));
+  const histMap = new Map(hist.hours.map((h) => [h.he, h]));
+
+  // Compute ranges from today's curve
+  let minLoad = Infinity;
+  let maxLoad = -Infinity;
+  let minPrice = Infinity;
+  let maxPrice = -Infinity;
+
+  for (const h of today.hours) {
+    if (h.load != null) {
+      if (h.load < minLoad) minLoad = h.load;
+      if (h.load > maxLoad) maxLoad = h.load;
+    }
+    if (h.price != null) {
+      if (h.price < minPrice) minPrice = h.price;
+      if (h.price > maxPrice) maxPrice = h.price;
+    }
+  }
+
+  const loadRange =
+    Number.isFinite(minLoad) && Number.isFinite(maxLoad) && maxLoad > minLoad
+      ? maxLoad - minLoad
+      : 1;
+  const priceRange =
+    Number.isFinite(minPrice) && Number.isFinite(maxPrice) && maxPrice > minPrice
+      ? maxPrice - minPrice
+      : 1;
+
+  const LOAD_WEIGHT = 1.0;
+  const PRICE_WEIGHT = 1.5; // bias toward matching price more closely
 
   let sum = 0;
   let count = 0;
 
   for (let he = 1; he <= 24; he++) {
-    const ah = aMap.get(he);
-    const bh = bMap.get(he);
-    if (!ah || !bh) continue;
-    if (ah.load == null || bh.load == null) continue;
+    const t = todayMap.get(he);
+    const h = histMap.get(he);
+    if (!t || !h) continue;
 
-    const diff = ah.load - bh.load;
-    sum += diff * diff;
-    count++;
+    if (t.load != null && h.load != null) {
+      const norm = (t.load - h.load) / loadRange;
+      sum += LOAD_WEIGHT * norm * norm;
+      count++;
+    }
+
+    if (t.price != null && h.price != null) {
+      const norm = (t.price - h.price) / priceRange;
+      sum += PRICE_WEIGHT * norm * norm;
+      count++;
+    }
   }
 
   if (count === 0) return Number.POSITIVE_INFINITY;
@@ -636,7 +690,7 @@ export async function getTodayVsNearestNeighbourFromHistory(): Promise<NearestNe
   let bestDist = Number.POSITIVE_INFINITY;
 
   for (const day of candidates) {
-    const dist = loadShapeDistance(today, day);
+    const dist = combinedDistance(today, day);
     if (!Number.isFinite(dist)) continue;
     if (dist < bestDist) {
       bestDist = dist;
@@ -656,6 +710,7 @@ export async function getTodayVsNearestNeighbourFromHistory(): Promise<NearestNe
     const n = nnMap.get(he);
 
     const todayPrice = t?.price ?? null;
+    const todayPriceSource = t?.priceSource ?? null;
     const nnPrice = n?.price ?? null;
     const todayLoad = t?.load ?? null;
     const nnLoad = n?.load ?? null;
@@ -668,6 +723,7 @@ export async function getTodayVsNearestNeighbourFromHistory(): Promise<NearestNe
     rows.push({
       he,
       todayPrice,
+      todayPriceSource,
       nnPrice,
       deltaPrice,
       todayLoad,

@@ -18,9 +18,12 @@ function formatNumber(
   });
 }
 
+type PriceSource = "actual" | "forecast" | null;
+
 type NearestNeighbourRow = {
   he: number;
   todayPrice: number | null;
+  todayPriceSource: PriceSource;
   nnPrice: number | null;
   deltaPrice: number | null;
   todayLoad: number | null;
@@ -35,11 +38,6 @@ type NearestNeighbourResult = {
 };
 
 export default async function NearestNeighbourPage() {
-  // This helper will:
-  //  - pull "today" from AESO Actual/Forecast (WMRQH)
-  //  - pull historical hourly price + AIL from your offline AESO history CSV
-  //  - pick the nearest-neighbour date based on the load shape
-  //  - return per-HE rows with today vs NN values and deltas
   const result = (await getTodayVsNearestNeighbourFromHistory()) as
     | NearestNeighbourResult
     | null;
@@ -65,8 +63,11 @@ export default async function NearestNeighbourPage() {
                 </span>
                 . Today&apos;s curve is built from the AESO Actual/Forecast
                 (WMRQH) report, and the analogue day is chosen from historical
-                hourly pool price and AIL based on how closely its load shape
-                matches today.
+                hourly pool price and AIL based on a combined match of{" "}
+                <span className="font-medium text-slate-200">
+                  load shape and price shape
+                </span>
+                .
               </p>
             </div>
 
@@ -103,7 +104,7 @@ export default async function NearestNeighbourPage() {
               </li>
               <li>
                 Your historical AESO CSV (e.g.{" "}
-                <code className="rounded bg-slate-950 px-1 py-0.5">
+                <code className="rounded bg-slate-950 px-1 py-0.5 text-[11px]">
                   lib/data/nn-history.csv
                 </code>
                 ) contains at least one full day of hourly pool price and AIL.
@@ -112,9 +113,25 @@ export default async function NearestNeighbourPage() {
           </section>
         ) : (
           <section className="mt-4 rounded-2xl border border-slate-800 bg-slate-900/80 p-4">
-            <h2 className="mb-2 text-sm font-semibold tracking-tight text-slate-200">
-              Today vs Nearest Neighbour (HE 1–24)
-            </h2>
+            <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <h2 className="text-sm font-semibold tracking-tight text-slate-200">
+                Today vs Nearest Neighbour (HE 1–24)
+              </h2>
+              <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-400">
+                <span className="flex items-center gap-1">
+                  <span className="inline-block h-2 w-2 rounded-full bg-emerald-400" />
+                  <span>Today price uses AESO actual</span>
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="inline-block h-2 w-2 rounded-full bg-sky-400" />
+                  <span>Today price uses AESO forecast</span>
+                </span>
+                <span className="text-slate-500">
+                  A/F tag beside price = Actual / Forecast
+                </span>
+              </div>
+            </div>
+
             <p className="mb-3 text-[11px] text-slate-400">
               For each hour ending (HE) this table compares today&apos;s{" "}
               <span className="font-medium text-slate-200">
@@ -125,7 +142,8 @@ export default async function NearestNeighbourPage() {
                 best-known AIL
               </span>{" "}
               against the selected historical analogue day from AESO&apos;s
-              hourly pool price &amp; AIL history.
+              hourly pool price &amp; AIL history. The nearest neighbour is
+              chosen to minimise differences in both load and price.
             </p>
 
             <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/40">
@@ -145,6 +163,13 @@ export default async function NearestNeighbourPage() {
                   {result.rows.map((row) => {
                     const dPrice = row.deltaPrice ?? null;
                     const dLoad = row.deltaLoad ?? null;
+
+                    const todayPriceClass =
+                      row.todayPriceSource === "actual"
+                        ? "text-emerald-300"
+                        : row.todayPriceSource === "forecast"
+                        ? "text-sky-300"
+                        : "text-slate-300";
 
                     const priceClass =
                       dPrice == null
@@ -172,16 +197,27 @@ export default async function NearestNeighbourPage() {
                         <td className="px-3 py-2 text-[11px] font-medium text-slate-200">
                           HE {row.he.toString().padStart(2, "0")}
                         </td>
-                        <td className="px-3 py-2 text-[11px]">
+
+                        {/* Today price with actual/forecast colouring */}
+                        <td
+                          className={`px-3 py-2 text-[11px] ${todayPriceClass}`}
+                        >
                           {row.todayPrice == null
                             ? "—"
                             : `$${formatNumber(row.todayPrice, 0)}`}
+                          {row.todayPriceSource && (
+                            <span className="ml-1 rounded bg-slate-900 px-1 py-[1px] text-[9px] font-semibold uppercase tracking-wide text-slate-400">
+                              {row.todayPriceSource === "actual" ? "A" : "F"}
+                            </span>
+                          )}
                         </td>
+
                         <td className="px-3 py-2 text-[11px] text-slate-300">
                           {row.nnPrice == null
                             ? "—"
                             : `$${formatNumber(row.nnPrice, 0)}`}
                         </td>
+
                         <td className={`px-3 py-2 text-[11px] ${priceClass}`}>
                           {dPrice == null
                             ? "—"
@@ -190,12 +226,14 @@ export default async function NearestNeighbourPage() {
                                 0
                               )}`}
                         </td>
+
                         <td className="px-3 py-2 text-[11px] text-slate-300">
                           {formatNumber(row.todayLoad, 0)}
                         </td>
                         <td className="px-3 py-2 text-[11px] text-slate-300">
                           {formatNumber(row.nnLoad, 0)}
                         </td>
+
                         <td className={`px-3 py-2 text-[11px] ${loadClass}`}>
                           {dLoad == null
                             ? "—"
@@ -216,10 +254,10 @@ export default async function NearestNeighbourPage() {
               the AESO <span className="font-medium">Actual / Forecast</span>{" "}
               (WMRQH) report, using actuals where published and forecasts
               elsewhere. The nearest-neighbour curve is selected from historical
-              hourly pool price and AIL (for example, the AESO &quot;Hourly
-              Metered Volumes and Pool Price and AIL&quot; data you trimmed
-              into your local history file), based purely on similarity of the
-              load shape.
+              hourly pool price and AIL (e.g. the AESO &quot;Hourly Metered
+              Volumes and Pool Price and AIL&quot; data you trimmed into your
+              local history file), based on similarity of both load and price
+              profiles.
             </p>
           </section>
         )}
