@@ -5,10 +5,14 @@ import {
   getNearestNeighbourStates,
   getTodayVsNearestNeighbourFromHistory,
   summarizeDay,
+  fetchAesoActualForecastRows,
   type HourlyState,
+  type AesoActualForecastRow,
 } from "../lib/marketData";
 
 export const revalidate = 60; // regenerate at most once per minute
+
+type PriceSource = "actual" | "forecast" | null;
 
 function formatNumber(n: number | null | undefined, decimals = 0) {
   if (n == null || Number.isNaN(n)) return "—";
@@ -86,10 +90,6 @@ function sumTielines(s: HourlyState | null | undefined): number | null {
 /**
  * Build joined rows that look like the Excel "Supply Cushion" tab:
  * NN vs real-time values plus hourly / cumulative deltas.
- *
- * At this stage the NN side is still fed by getNearestNeighbourStates
- * (legacy; currently today-only). We later overwrite NN price/load with the
- * real nearest-neighbour history so those columns match /nearest-neighbour.
  */
 function buildJoinedRows(
   todayStates: HourlyState[],
@@ -169,12 +169,57 @@ function buildJoinedRows(
   });
 }
 
+/**
+ * For the “today” side, figure out whether each HE’s load/price
+ * is coming from AESO actuals or forecasts, based on the WMRQH rows.
+ */
+function buildSourceMapsForToday(
+  allRows: AesoActualForecastRow[],
+  todayStates: HourlyState[]
+): {
+  priceSourceByHe: Map<number, PriceSource>;
+  loadSourceByHe: Map<number, PriceSource>;
+} {
+  const priceSourceByHe = new Map<number, PriceSource>();
+  const loadSourceByHe = new Map<number, PriceSource>();
+
+  if (!todayStates.length || !allRows.length) {
+    return { priceSourceByHe, loadSourceByHe };
+  }
+
+  const dateIso = todayStates[0].date;
+  const todaysRows = allRows.filter((r) => r.date === dateIso);
+
+  for (const r of todaysRows) {
+    let priceSource: PriceSource = null;
+    if (r.actualPoolPrice != null) {
+      priceSource = "actual";
+    } else if (r.forecastPoolPrice != null) {
+      priceSource = "forecast";
+    }
+
+    let loadSource: PriceSource = null;
+    if (r.actualAil != null) {
+      loadSource = "actual";
+    } else if (r.forecastAil != null) {
+      loadSource = "forecast";
+    }
+
+    priceSourceByHe.set(r.he, priceSource);
+    loadSourceByHe.set(r.he, loadSource);
+  }
+
+  return { priceSourceByHe, loadSourceByHe };
+}
+
 export default async function DashboardPage() {
-  const [todayStates, nnStates, nnResult] = await Promise.all([
-    getTodayHourlyStates(),
-    getNearestNeighbourStates(),
-    getTodayVsNearestNeighbourFromHistory(),
-  ]);
+  const [{ rows: aesoRows }, todayStates, nnStates, nnResult] =
+    await Promise.all([
+      fetchAesoActualForecastRows(),
+      getTodayHourlyStates(),
+      getNearestNeighbourStates(),
+      getTodayVsNearestNeighbourFromHistory(),
+    ]);
 
   const summary = summarizeDay(todayStates);
   const now = summary.current;
@@ -205,6 +250,12 @@ export default async function DashboardPage() {
       row.dLoad = hist.deltaLoad;
     }
   }
+
+  // Build “actual vs forecast” source maps for today’s side
+  const { priceSourceByHe, loadSourceByHe } = buildSourceMapsForToday(
+    aesoRows,
+    todayStates
+  );
 
   const comparisonDate =
     nnResult && nnResult.nnDate ? nnResult.nnDate : "";
@@ -370,11 +421,22 @@ export default async function DashboardPage() {
                 {rows.map((row) => {
                   const isCurrent = now && row.he === now.he;
 
-                  const priceDeltaClass =
-                    row.dPrice != null && row.dPrice !== 0
-                      ? row.dPrice > 0
-                        ? "text-emerald-400"
-                        : "text-red-400"
+                  const priceSource =
+                    priceSourceByHe.get(row.he) ?? null;
+                  const loadSource = loadSourceByHe.get(row.he) ?? null;
+
+                  const todayPriceClass =
+                    priceSource === "actual"
+                      ? "text-emerald-400"
+                      : priceSource === "forecast"
+                      ? "text-sky-400"
+                      : "text-slate-300";
+
+                  const rtLoadClass =
+                    loadSource === "actual"
+                      ? "text-emerald-400"
+                      : loadSource === "forecast"
+                      ? "text-sky-400"
                       : "text-slate-300";
 
                   const loadDeltaClass =
@@ -450,8 +512,8 @@ export default async function DashboardPage() {
                           : "—"}
                       </td>
 
-                      {/* AESO SD price (today price) */}
-                      <td className={"px-3 py-2 " + priceDeltaClass}>
+                      {/* AESO SD price (today price) – colour by actual vs forecast */}
+                      <td className={"px-3 py-2 " + todayPriceClass}>
                         {row.todayPrice != null
                           ? `$${formatNumber(row.todayPrice, 2)}`
                           : "—"}
@@ -461,7 +523,7 @@ export default async function DashboardPage() {
                       <td className="px-3 py-2 text-slate-300">
                         {formatNumber(row.nnLoad, 0)}
                       </td>
-                      <td className="px-3 py-2 text-slate-300">
+                      <td className={"px-3 py-2 " + rtLoadClass}>
                         {formatNumber(row.rtLoad, 0)}
                       </td>
                       <td className={"px-3 py-2 " + loadDeltaClass}>
