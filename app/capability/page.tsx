@@ -377,14 +377,26 @@ export default async function CapabilityPage() {
       <main className="min-h-screen bg-slate-950 text-slate-100">
         <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
           <header className="mb-4 space-y-2">
-            <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
-              Market Capability
-            </h1>
-            <p className="max-w-2xl text-sm text-slate-400">
-              This view depends on AESO&apos;s Actual/Forecast WMRQH report.
-              Right now, no rows could be loaded, so the page cannot show
-              current load, price, or capability yet.
-            </p>
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
+                  Market Capability
+                </h1>
+                <p className="max-w-2xl text-sm text-slate-400">
+                  This view depends on AESO&apos;s Actual/Forecast WMRQH
+                  report. Right now, no rows could be loaded, so the page
+                  cannot show current load, price, or capability yet.
+                </p>
+              </div>
+              <a
+                href={AESO_7DAY_CAPABILITY_HTML_URL}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center justify-center rounded-full border border-sky-500/70 bg-sky-900/40 px-3 py-1.5 text-[11px] font-semibold text-sky-100 hover:bg-sky-800/60"
+              >
+                Open AESO 7-Day Capability (HTML)
+              </a>
+            </div>
           </header>
 
           <NavTabs />
@@ -605,105 +617,35 @@ export default async function CapabilityPage() {
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100">
       <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
-        {/* Page header */}
+        {/* Page header with button */}
         <header className="mb-4 space-y-2">
-          <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
-            Market Capability (Real AESO Load, Price &amp; Availability)
-          </h1>
-          <p className="max-w-3xl text-sm text-slate-400">
-            This view combines AESO&apos;s Actual/Forecast WMRQH report
-            (load and pool price) with the 7-Day Hourly Available
-            Capability report. Availability by fuel is interpreted directly
-            from AESO&apos;s HTML (scaled as percentages). No synthetic
-            modelling is used.
-          </p>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
+                Market Capability (Real AESO Load, Price &amp; Availability)
+              </h1>
+              <p className="max-w-3xl text-sm text-slate-400">
+                This view combines AESO&apos;s Actual/Forecast WMRQH
+                report (load and pool price) with the 7-Day Hourly
+                Available Capability report. Availability by fuel is
+                interpreted directly from AESO&apos;s HTML (scaled as
+                percentages). No synthetic modelling is used.
+              </p>
+            </div>
+
+            <a
+              href={AESO_7DAY_CAPABILITY_HTML_URL}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center justify-center rounded-full border border-sky-500/70 bg-sky-900/40 px-3 py-1.5 text-[11px] font-semibold text-sky-100 hover:bg-sky-800/60"
+            >
+              Open AESO 7-Day Capability (HTML)
+            </a>
+          </div>
         </header>
 
         {/* Shared nav bar */}
         <NavTabs />
-
-        {/* Summary banner: WMRQH + compact 7-Day debug, link inside bar */}
-        <section className="mt-4 rounded-2xl border border-sky-900 bg-sky-950/40 px-4 py-3 text-xs text-sky-100">
-          <div className="space-y-2">
-            {/* Top row: source chip + 7-day link button */}
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-              <div className="inline-flex items-center gap-2 rounded-full bg-sky-900/80 px-3 py-1 text-[11px] font-medium">
-                <span className="h-2 w-2 rounded-full bg-sky-400" />
-                <span>SOURCE: AESO ActualForecastWMRQH (load &amp; price)</span>
-              </div>
-
-              <a
-                href={AESO_7DAY_CAPABILITY_HTML_URL}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center justify-center rounded-full border border-sky-500/70 bg-sky-900/40 px-3 py-1.5 text-[11px] font-semibold text-sky-100 hover:bg-sky-800/60"
-              >
-                Open AESO 7-Day Capability (HTML)
-              </a>
-            </div>
-
-            {/* WMRQH date & HE */}
-            <div className="text-[11px] text-sky-200/80">
-              WMRQH report date:{" "}
-              <span className="font-mono">{reportDate}</span> · Current HE
-              (approx, Alberta):{" "}
-              <span className="font-mono">HE {formatHe(currentHe)}</span>
-            </div>
-
-            {/* Current load & price snapshot */}
-            <div className="flex flex-wrap gap-3 text-[11px] text-sky-100/90">
-              <span>
-                AIL (actual):{" "}
-                <span className="font-mono">
-                  {formatNumber(currentLoadActual, 0)} MW
-                </span>
-              </span>
-              <span>
-                AIL (forecast):{" "}
-                <span className="font-mono">
-                  {formatNumber(currentLoadForecast, 0)} MW
-                </span>
-              </span>
-              <span>
-                Pool Price (actual):{" "}
-                <span className="font-mono">
-                  {formatPrice(currentPriceActual)}
-                </span>
-              </span>
-              <span>
-                Pool Price (forecast):{" "}
-                <span className="font-mono">
-                  {formatPrice(currentPriceForecast)}
-                </span>
-              </span>
-            </div>
-
-            {/* Compact debug lines */}
-            <div className="mt-1 space-y-1 text-[11px] text-sky-300/80">
-              <p>
-                WMRQH debug: HTTP {wmrqhDebug.httpStatus || 0}, rows{" "}
-                {wmrqhDebug.parsedRowCount}, dates{" "}
-                {wmrqhDebug.reportDates.length
-                  ? wmrqhDebug.reportDates.join(", ")
-                  : "none"}
-                {wmrqhDebug.errorMessage
-                  ? ` · error: ${wmrqhDebug.errorMessage}`
-                  : null}
-              </p>
-              <p>
-                7-Day capability debug: HTTP {capDebug.httpStatus || 0},{" "}
-                body length {capDebug.bodyLength} chars, parsed cells{" "}
-                {capDebug.parsedCellCount}
-                {capDebug.dates.length
-                  ? ` · dates: ${capDebug.dates.join(", ")}`
-                  : ""}
-                {capDebug.errorMessage
-                  ? ` · error: ${capDebug.errorMessage}`
-                  : ""}
-              </p>
-            </div>
-          </div>
-        </section>
 
         {/* Capability tables */}
         <section className="mt-6 space-y-8">
