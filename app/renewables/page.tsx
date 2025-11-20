@@ -17,7 +17,7 @@ const AESO_WIND_12H_URL =
 const AESO_SOLAR_12H_URL =
   "http://ets.aeso.ca/Market/Reports/Manual/Operations/prodweb_reports/wind_solar_forecast/solar_rpt_shortterm.csv";
 
-// Internal HTTPS proxy endpoints for downloads (see route files below)
+// Internal HTTPS proxy endpoints for downloads (see /api routes)
 const SOLAR_DOWNLOAD_PATH = "/api/aeso/solar-shortterm-csv";
 const WIND_DOWNLOAD_PATH = "/api/aeso/wind-shortterm-csv";
 
@@ -213,42 +213,26 @@ export default async function RenewablesPage() {
       <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
         {/* ---------- Header ---------- */}
         <header className="mb-4 space-y-3">
-          <div>
-            <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
-              Renewables – Live AESO Data
-            </h1>
-            <p className="max-w-2xl text-sm text-slate-400">
-              Live Alberta wind and solar{" "}
-              <span className="font-semibold">forecasts and actuals</span> for{" "}
-              <span className="font-mono">{abDate}</span>, pulled directly from
-              AESO&apos;s 12-hour short-term wind and solar reports. No
-              synthetic numbers – everything you see here is from the AESO CSVs.
-            </p>
-          </div>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
+                Renewables – Live AESO Data
+              </h1>
+              <p className="max-w-2xl text-sm text-slate-400">
+                Live Alberta wind and solar{" "}
+                <span className="font-semibold">forecasts and actuals</span> for{" "}
+                <span className="font-mono">{abDate}</span>, pulled directly
+                from AESO&apos;s 12-hour short-term wind and solar reports. No
+                synthetic numbers – everything you see here is from the AESO
+                CSVs.
+              </p>
+            </div>
 
-          {/* Action buttons – hit our HTTPS proxy routes, not http:// AESO directly */}
-          <div className="flex flex-wrap gap-2 text-xs">
-            <a
-              href={SOLAR_DOWNLOAD_PATH}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center rounded-full border border-slate-700 bg-slate-900/80 px-3 py-1 font-medium text-slate-100 hover:bg-slate-900"
-            >
-              Download Solar CSV
-            </a>
-            <a
-              href={WIND_DOWNLOAD_PATH}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center rounded-full border border-slate-700 bg-slate-900/80 px-3 py-1 font-medium text-slate-100 hover:bg-slate-900"
-            >
-              Download Wind CSV
-            </a>
             <a
               href={AESO_CSD_URL}
               target="_blank"
               rel="noreferrer"
-              className="inline-flex items-center rounded-full border border-slate-700 bg-slate-900/80 px-3 py-1 font-medium text-slate-100 hover:bg-slate-900"
+              className="inline-flex items-center justify-center rounded-full border border-slate-700 bg-slate-900/80 px-3 py-1 text-xs font-medium text-slate-100 hover:bg-slate-900"
             >
               Open CSD report
             </a>
@@ -261,15 +245,29 @@ export default async function RenewablesPage() {
         <section className="mt-4 grid gap-4 lg:grid-cols-2">
           {/* Solar table */}
           <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-4">
-            <h2 className="mb-2 text-sm font-semibold tracking-tight">
-              Solar – 12-hour Forecast &amp; Actual (MW)
-            </h2>
-            <p className="mb-2 text-[11px] text-slate-400">
-              Direct from <span className="font-mono">solar_rpt_shortterm.csv</span>.
-              Each row is a forecast transaction time with Min / Most Likely /
-              Max and the corresponding{" "}
-              <span className="font-semibold">Actual</span> from the same file.
-            </p>
+            <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <h2 className="text-sm font-semibold tracking-tight">
+                  Solar – 12-hour Forecast &amp; Actual (MW)
+                </h2>
+                <p className="mt-1 text-[11px] text-slate-400">
+                  Direct from{" "}
+                  <span className="font-mono">solar_rpt_shortterm.csv</span>.
+                  Each row is a forecast transaction time with Min / Most Likely
+                  / Max and the corresponding{" "}
+                  <span className="font-semibold">Actual</span> from the same
+                  file.
+                </p>
+              </div>
+              <a
+                href={SOLAR_DOWNLOAD_PATH}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center justify-center rounded-full border border-slate-700 bg-slate-900/80 px-3 py-1 text-[11px] font-medium text-slate-100 hover:bg-slate-900"
+              >
+                Download Solar CSV
+              </a>
+            </div>
 
             {!solarForecast.ok && (
               <p className="mb-2 text-[11px] text-red-300">
@@ -360,15 +358,29 @@ export default async function RenewablesPage() {
 
           {/* Wind table */}
           <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-4">
-            <h2 className="mb-2 text-sm font-semibold tracking-tight">
-              Wind – 12-hour Forecast &amp; Actual (MW)
-            </h2>
-            <p className="mb-2 text-[11px] text-slate-400">
-              Direct from <span className="font-mono">wind_rpt_shortterm.csv</span>.
-              Each row is a forecast transaction time with Min / Most Likely /
-              Max and the corresponding{" "}
-              <span className="font-semibold">Actual</span> from the same file.
-            </p>
+            <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <h2 className="text-sm font-semibold tracking-tight">
+                  Wind – 12-hour Forecast &amp; Actual (MW)
+                </h2>
+                <p className="mt-1 text-[11px] text-slate-400">
+                  Direct from{" "}
+                  <span className="font-mono">wind_rpt_shortterm.csv</span>.
+                  Each row is a forecast transaction time with Min / Most Likely
+                  / Max and the corresponding{" "}
+                  <span className="font-semibold">Actual</span> from the same
+                  file.
+                </p>
+              </div>
+              <a
+                href={WIND_DOWNLOAD_PATH}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center justify-center rounded-full border border-slate-700 bg-slate-900/80 px-3 py-1 text-[11px] font-medium text-slate-100 hover:bg-slate-900"
+              >
+                Download Wind CSV
+              </a>
+            </div>
 
             {!windForecast.ok && (
               <p className="mb-2 text-[11px] text-red-300">
@@ -461,7 +473,7 @@ export default async function RenewablesPage() {
         <p className="mt-4 text-[11px] text-slate-500">
           All values on this page are taken directly from AESO short-term wind
           and solar reports. If something looks off, use the download buttons
-          above to pull the raw CSVs, or open the CSD report for a
+          beside each table to pull the raw CSVs, or open the CSD report for a
           cross-check.
         </p>
       </div>
