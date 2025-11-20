@@ -356,11 +356,9 @@ export async function getTodayHourlyStates(): Promise<HourlyState[]> {
 }
 
 /**
- * Nearest neighbour states.
+ * Nearest neighbour states (legacy, for older synthetic UI pieces).
  *
- * For now, this returns the same AESO-based states as today. Once we have
- * a proper historical data pipeline (CSD, Supply Adequacy, etc.), this will
- * be replaced with a real nearest-neighbour selection.
+ * Currently just returns today's AESO-based states so nothing breaks.
  */
 export async function getNearestNeighbourStates(): Promise<HourlyState[]> {
   return getTodayHourlyStates();
@@ -406,5 +404,281 @@ export function summarizeDay(states: HourlyState[]): DailySummary {
     maxPrice,
     minCushion,
     avgCushionPct: states.length ? sumCushionPct / states.length : 0,
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Nearest-neighbour (today vs historical AESO data)                 */
+/* ------------------------------------------------------------------ */
+
+type NnHour = {
+  he: number;
+  price: number | null;
+  load: number | null;
+};
+
+type NnDay = {
+  date: string; // YYYY-MM-DD
+  hours: NnHour[];
+};
+
+export type NearestNeighbourRow = {
+  he: number;
+  todayPrice: number | null;
+  nnPrice: number | null;
+  deltaPrice: number | null;
+  todayLoad: number | null;
+  nnLoad: number | null;
+  deltaLoad: number | null;
+};
+
+export type NearestNeighbourResult = {
+  todayDate: string; // YYYY-MM-DD (Alberta)
+  nnDate: string; // YYYY-MM-DD (Alberta) – the chosen analogue day
+  rows: NearestNeighbourRow[];
+};
+
+// Best-known price/load for a single WMRQH row.
+function bestKnownPrice(r: AesoActualForecastRow): number | null {
+  return r.actualPoolPrice ?? r.forecastPoolPrice ?? null;
+}
+
+function bestKnownLoad(r: AesoActualForecastRow): number | null {
+  return r.actualAil ?? r.forecastAil ?? null;
+}
+
+// Approx Alberta now (UTC-7)
+function approxAlbertaNow(): Date {
+  const nowUtc = new Date();
+  return new Date(nowUtc.getTime() - 7 * 60 * 60 * 1000);
+}
+
+function toDateKey(d: Date): string {
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * Build today's curve (price + load by HE) from live AESO WMRQH,
+ * using actuals where published and forecasts elsewhere.
+ */
+async function buildTodayCurveFromWmrqh(): Promise<NnDay | null> {
+  const { rows } = await fetchAesoActualForecastRows();
+  if (!rows.length) return null;
+
+  const nowAb = approxAlbertaNow();
+  const todayKey = toDateKey(nowAb);
+
+  let targetDate = todayKey;
+  let todaysRows = rows.filter((r) => r.date === targetDate);
+
+  if (!todaysRows.length) {
+    // If today's date is not present, fall back to the latest report date.
+    const allDates = Array.from(new Set(rows.map((r) => r.date))).sort();
+    targetDate = allDates[allDates.length - 1];
+    todaysRows = rows.filter((r) => r.date === targetDate);
+  }
+
+  if (!todaysRows.length) return null;
+
+  const byHe = new Map<number, NnHour>();
+
+  for (const r of todaysRows) {
+    const price = bestKnownPrice(r);
+    const load = bestKnownLoad(r);
+    byHe.set(r.he, {
+      he: r.he,
+      price,
+      load,
+    });
+  }
+
+  const hours: NnHour[] = [];
+  for (let he = 1; he <= 24; he++) {
+    const h = byHe.get(he) ?? { he, price: null, load: null };
+    hours.push(h);
+  }
+
+  return {
+    date: targetDate,
+    hours,
+  };
+}
+
+/**
+ * Load historical AESO curves from lib/data/nn-history.csv.
+ * Expected header:
+ *   date,he,actual_pool_price,actual_ail,hour_ahead_pool_price_forecast,
+ *   export_bc,export_mt,export_sk,import_bc,import_mt,import_sk
+ *
+ * We only need actual_pool_price + actual_ail for NN selection.
+ */
+async function loadHistoricalNnDays(): Promise<NnDay[]> {
+  const fs = await import("node:fs/promises");
+  const path = await import("node:path");
+
+  const filePath = path.join.default(
+    process.cwd(),
+    "lib",
+    "data",
+    "nn-history.csv"
+  );
+
+  const raw = await fs.readFile(filePath, "utf8");
+  const lines = raw
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+
+  if (lines.length <= 1) return [];
+
+  const header = lines[0];
+  const headers = header.split(",").map((h) => h.trim());
+
+  const idx = (name: string) => headers.indexOf(name);
+
+  const dateIdx = idx("date");
+  const heIdx = idx("he");
+  const priceIdx = idx("actual_pool_price");
+  const loadIdx = idx("actual_ail");
+
+  if (dateIdx === -1 || heIdx === -1 || priceIdx === -1 || loadIdx === -1) {
+    throw new Error(
+      "nn-history.csv must have at least: date,he,actual_pool_price,actual_ail columns."
+    );
+  }
+
+  const byDate = new Map<string, NnHour[]>();
+
+  const parseNum = (s: string): number | null => {
+    const t = s.trim();
+    if (!t) return null;
+    const n = Number(t);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line || line.startsWith("#")) continue;
+
+    const cols = line.split(",");
+    if (cols.length < headers.length) continue;
+
+    const date = cols[dateIdx].trim();
+    const he = Number(cols[heIdx]);
+    if (!date || !Number.isFinite(he)) continue;
+
+    const price = parseNum(cols[priceIdx]);
+    const load = parseNum(cols[loadIdx]);
+
+    const list = byDate.get(date) ?? [];
+    list.push({ he, price, load });
+    byDate.set(date, list);
+  }
+
+  const days: NnDay[] = [];
+
+  for (const [date, hoursRaw] of byDate.entries()) {
+    const hours = [...hoursRaw].sort((a, b) => a.he - b.he);
+    days.push({ date, hours });
+  }
+
+  // Sort by date ascending
+  days.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+
+  return days;
+}
+
+/**
+ * Simple distance metric: sum of squared differences of load (AIL) across
+ * hours where both days have non-null load. Lower = closer.
+ */
+function loadShapeDistance(a: NnDay, b: NnDay): number {
+  const aMap = new Map(a.hours.map((h) => [h.he, h]));
+  const bMap = new Map(b.hours.map((h) => [h.he, h]));
+
+  let sum = 0;
+  let count = 0;
+
+  for (let he = 1; he <= 24; he++) {
+    const ah = aMap.get(he);
+    const bh = bMap.get(he);
+    if (!ah || !bh) continue;
+    if (ah.load == null || bh.load == null) continue;
+
+    const diff = ah.load - bh.load;
+    sum += diff * diff;
+    count++;
+  }
+
+  if (count === 0) return Number.POSITIVE_INFINITY;
+  return sum / count;
+}
+
+/**
+ * Nearest-neighbour selection using:
+ *  - "today" from live AESO WMRQH (best-known price/load)
+ *  - history from lib/data/nn-history.csv (actual pool price + AIL)
+ *
+ * Returns data in the shape the /nearest-neighbour page expects.
+ */
+export async function getTodayVsNearestNeighbourFromHistory(): Promise<NearestNeighbourResult | null> {
+  const today = await buildTodayCurveFromWmrqh();
+  if (!today) return null;
+
+  const history = await loadHistoricalNnDays();
+  if (!history.length) return null;
+
+  // Exclude today's date if present in the history file to avoid trivial self-match.
+  const candidates = history.filter((d) => d.date !== today.date);
+  if (!candidates.length) return null;
+
+  let best: NnDay | null = null;
+  let bestDist = Number.POSITIVE_INFINITY;
+
+  for (const day of candidates) {
+    const dist = loadShapeDistance(today, day);
+    if (!Number.isFinite(dist)) continue;
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = day;
+    }
+  }
+
+  if (!best) return null;
+
+  const todayMap = new Map(today.hours.map((h) => [h.he, h]));
+  const nnMap = new Map(best.hours.map((h) => [h.he, h]));
+
+  const rows: NearestNeighbourRow[] = [];
+
+  for (let he = 1; he <= 24; he++) {
+    const t = todayMap.get(he);
+    const n = nnMap.get(he);
+
+    const todayPrice = t?.price ?? null;
+    const nnPrice = n?.price ?? null;
+    const todayLoad = t?.load ?? null;
+    const nnLoad = n?.load ?? null;
+
+    const deltaPrice =
+      todayPrice != null && nnPrice != null ? todayPrice - nnPrice : null;
+    const deltaLoad =
+      todayLoad != null && nnLoad != null ? todayLoad - nnLoad : null;
+
+    rows.push({
+      he,
+      todayPrice,
+      nnPrice,
+      deltaPrice,
+      todayLoad,
+      nnLoad,
+      deltaLoad,
+    });
+  }
+
+  return {
+    todayDate: today.date,
+    nnDate: best.date,
+    rows,
   };
 }
