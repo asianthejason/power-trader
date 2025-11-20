@@ -4,7 +4,7 @@ import NavTabs from "../components/NavTabs";
 
 export const revalidate = 60;
 
-// AESO sources used on this page (all *real* data, no synthetic):
+// AESO sources used on this page (all real data, no synthetic):
 // - Current Supply & Demand (CSD) – live actual wind & solar
 // - Wind 12-hour forecast CSV
 // - Solar 12-hour forecast CSV
@@ -12,10 +12,10 @@ const AESO_CSD_URL =
   "http://ets.aeso.ca/ets_web/ip/Market/Reports/CSDReportServlet";
 
 const AESO_WIND_12H_URL =
-  "https://ets.aeso.ca/Market/Reports/Manual/Operations/prodweb_reports/wind_solar_forecast/wind_rpt_shortterm.csv";
+  "http://ets.aeso.ca/Market/Reports/Manual/Operations/prodweb_reports/wind_solar_forecast/wind_rpt_shortterm.csv";
 
 const AESO_SOLAR_12H_URL =
-  "https://ets.aeso.ca/Market/Reports/Manual/Operations/prodweb_reports/wind_solar_forecast/solar_rpt_shortterm.csv";
+  "http://ets.aeso.ca/Market/Reports/Manual/Operations/prodweb_reports/wind_solar_forecast/solar_rpt_shortterm.csv";
 
 /* ---------- small helpers ---------- */
 
@@ -73,11 +73,13 @@ function parseMw(raw: string | undefined): number | null {
 type CsdRenewablesSnapshot = {
   windMw: number | null;
   solarMw: number | null;
-  fetchedOk: boolean;
+  ok: boolean;
+  status: number | null;
+  statusText: string | null;
 };
 
 /**
- * Lightweight HTML scraper for AESO CSD.
+ * HTML scraper for AESO CSD.
  *
  * We look for lines like "Wind Generation ... 1234 MW" and
  * "Solar Generation ... 567 MW". If parsing fails, we return nulls.
@@ -86,13 +88,27 @@ async function fetchCsdRenewablesSnapshot(): Promise<CsdRenewablesSnapshot> {
   try {
     const res = await fetch(AESO_CSD_URL, {
       cache: "no-store",
+      // AESO sometimes behaves better if we look like a browser.
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (compatible; AlbertaPowerTraderBot/1.0; +https://power-trader.vercel.app)",
+      },
     });
+
+    const status = res.status;
+    const statusText = res.statusText;
 
     if (!res.ok) {
       console.error(
-        `Failed to fetch AESO CSD (${res.status} ${res.statusText})`
+        `Failed to fetch AESO CSD (${status} ${statusText})`
       );
-      return { windMw: null, solarMw: null, fetchedOk: false };
+      return {
+        windMw: null,
+        solarMw: null,
+        ok: false,
+        status,
+        statusText,
+      };
     }
 
     const html = await res.text();
@@ -118,11 +134,19 @@ async function fetchCsdRenewablesSnapshot(): Promise<CsdRenewablesSnapshot> {
     return {
       windMw: Number.isFinite(windMw) ? windMw : null,
       solarMw: Number.isFinite(solarMw) ? solarMw : null,
-      fetchedOk: true,
+      ok: true,
+      status,
+      statusText,
     };
   } catch (err) {
     console.error("Error fetching AESO CSD renewables:", err);
-    return { windMw: null, solarMw: null, fetchedOk: false };
+    return {
+      windMw: null,
+      solarMw: null,
+      ok: false,
+      status: null,
+      statusText: (err as Error)?.message ?? null,
+    };
   }
 }
 
@@ -137,17 +161,35 @@ type ForecastRow = {
   max: number | null;
 };
 
-async function fetchAesoForecast12h(kind: RenewableType): Promise<ForecastRow[]> {
+type ForecastResult = {
+  rows: ForecastRow[];
+  ok: boolean;
+  status: number | null;
+  statusText: string | null;
+};
+
+async function fetchAesoForecast12h(
+  kind: RenewableType
+): Promise<ForecastResult> {
   const url = kind === "wind" ? AESO_WIND_12H_URL : AESO_SOLAR_12H_URL;
 
   try {
-    const res = await fetch(url, { cache: "no-store" });
+    const res = await fetch(url, {
+      cache: "no-store",
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (compatible; AlbertaPowerTraderBot/1.0; +https://power-trader.vercel.app)",
+      },
+    });
+
+    const status = res.status;
+    const statusText = res.statusText;
 
     if (!res.ok) {
       console.error(
-        `Failed to fetch AESO ${kind} 12-hour forecast (${res.status} ${res.statusText})`
+        `Failed to fetch AESO ${kind} 12-hour forecast (${status} ${statusText})`
       );
-      return [];
+      return { rows: [], ok: false, status, statusText };
     }
 
     const text = await res.text();
@@ -158,7 +200,12 @@ async function fetchAesoForecast12h(kind: RenewableType): Promise<ForecastRow[]>
 
     if (lines.length < 2) {
       console.error(`AESO ${kind} forecast CSV has no data lines.`);
-      return [];
+      return {
+        rows: [],
+        ok: false,
+        status,
+        statusText: "CSV had no data rows",
+      };
     }
 
     const headerCells = splitCsvLine(lines[0]).map((h) => h.trim());
@@ -187,7 +234,6 @@ async function fetchAesoForecast12h(kind: RenewableType): Promise<ForecastRow[]>
       const mostLikely = parseMw(cols[mostIdx]);
       const max = parseMw(cols[maxIdx]);
 
-      // If we don't get any numbers, skip the row.
       if (min == null && mostLikely == null && max == null) continue;
 
       rows.push({
@@ -198,10 +244,15 @@ async function fetchAesoForecast12h(kind: RenewableType): Promise<ForecastRow[]>
       });
     }
 
-    return rows;
+    return { rows, ok: true, status, statusText };
   } catch (err) {
     console.error(`Error fetching AESO ${kind} 12-hour forecast:`, err);
-    return [];
+    return {
+      rows: [],
+      ok: false,
+      status: null,
+      statusText: (err as Error)?.message ?? null,
+    };
   }
 }
 
@@ -248,9 +299,23 @@ export default async function RenewablesPage() {
 
           {/* Live snapshot badges */}
           <div className="flex flex-wrap gap-2 text-xs">
-            <div className="inline-flex items-center rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-emerald-200">
-              <span className="mr-2 inline-block h-1.5 w-1.5 rounded-full bg-emerald-400" />
-              CSD snapshot (live actuals)
+            <div
+              className={
+                "inline-flex items-center rounded-full px-3 py-1 " +
+                (csdSnapshot.ok
+                  ? "border border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
+                  : "border border-red-500/40 bg-red-500/10 text-red-200")
+              }
+            >
+              <span
+                className={
+                  "mr-2 inline-block h-1.5 w-1.5 rounded-full " +
+                  (csdSnapshot.ok ? "bg-emerald-400" : "bg-red-400")
+                }
+              />
+              {csdSnapshot.ok
+                ? "CSD snapshot (live actuals)"
+                : "CSD snapshot unavailable"}
             </div>
             <div className="inline-flex items-center rounded-full border border-slate-700 bg-slate-900/70 px-3 py-1 text-slate-300">
               <span className="mr-1 text-slate-400">Wind:</span>
@@ -264,6 +329,16 @@ export default async function RenewablesPage() {
                 ? `${formatNumber(csdSnapshot.solarMw, 0)} MW`
                 : "unavailable"}
             </div>
+            {!csdSnapshot.ok && (
+              <div className="inline-flex items-center rounded-full border border-slate-800 bg-slate-900/70 px-3 py-1 text-[10px] text-slate-400">
+                CSD fetch error:
+                <span className="ml-1 font-mono">
+                  {csdSnapshot.status != null
+                    ? `${csdSnapshot.status} ${csdSnapshot.statusText ?? ""}`
+                    : csdSnapshot.statusText ?? "unknown"}
+                </span>
+              </div>
+            )}
           </div>
         </header>
 
@@ -281,6 +356,17 @@ export default async function RenewablesPage() {
               updated roughly every 10 minutes.
             </p>
 
+            {!solarForecast.ok && (
+              <p className="mb-2 text-[11px] text-red-300">
+                Could not load solar forecast CSV{" "}
+                {solarForecast.status != null && (
+                  <span className="font-mono">
+                    ({solarForecast.status} {solarForecast.statusText ?? ""})
+                  </span>
+                )}
+              </p>
+            )}
+
             <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/40">
               <table className="min-w-full text-left text-xs">
                 <thead className="bg-slate-900/80 text-[11px] uppercase tracking-wide text-slate-400">
@@ -292,18 +378,20 @@ export default async function RenewablesPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {solarForecast.length === 0 ? (
+                  {solarForecast.rows.length === 0 ? (
                     <tr>
                       <td
                         className="px-3 py-3 text-[11px] text-slate-400"
                         colSpan={4}
                       >
-                        No solar forecast data available right now (could not
-                        load AESO CSV).
+                        No solar forecast data rows available. Open the AESO
+                        Wind &amp; Solar Power Forecasting page and try
+                        right-clicking the &quot;Solar-12 hour&quot; link to
+                        confirm you can download the CSV from your network.
                       </td>
                     </tr>
                   ) : (
-                    solarForecast.map((row, idx) => (
+                    solarForecast.rows.map((row, idx) => (
                       <tr
                         key={`${row.timeLabel}-${idx}`}
                         className="border-t border-slate-800/60 hover:bg-slate-900/40"
@@ -338,6 +426,17 @@ export default async function RenewablesPage() {
               updated roughly every 10 minutes.
             </p>
 
+            {!windForecast.ok && (
+              <p className="mb-2 text-[11px] text-red-300">
+                Could not load wind forecast CSV{" "}
+                {windForecast.status != null && (
+                  <span className="font-mono">
+                    ({windForecast.status} {windForecast.statusText ?? ""})
+                  </span>
+                )}
+              </p>
+            )}
+
             <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/40">
               <table className="min-w-full text-left text-xs">
                 <thead className="bg-slate-900/80 text-[11px] uppercase tracking-wide text-slate-400">
@@ -349,18 +448,20 @@ export default async function RenewablesPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {windForecast.length === 0 ? (
+                  {windForecast.rows.length === 0 ? (
                     <tr>
                       <td
                         className="px-3 py-3 text-[11px] text-slate-400"
                         colSpan={4}
                       >
-                        No wind forecast data available right now (could not
-                        load AESO CSV).
+                        No wind forecast data rows available. Open the AESO Wind
+                        &amp; Solar Power Forecasting page and try
+                        right-clicking the &quot;Wind-12 hour&quot; link to
+                        confirm you can download the CSV from your network.
                       </td>
                     </tr>
                   ) : (
-                    windForecast.map((row, idx) => (
+                    windForecast.rows.map((row, idx) => (
                       <tr
                         key={`${row.timeLabel}-${idx}`}
                         className="border-t border-slate-800/60 hover:bg-slate-900/40"
@@ -388,10 +489,9 @@ export default async function RenewablesPage() {
 
         <p className="mt-4 text-[11px] text-slate-500">
           All values on this page are taken directly from AESO reports. If you
-          see &quot;unavailable&quot; or an empty table, it usually means the
-          AESO endpoints could not be reached or the CSV layout changed – in
-          that case you can open the linked AESO pages above to inspect the raw
-          data.
+          see &quot;unavailable&quot; or an empty table, check the small error
+          badges above for HTTP status codes and try downloading the linked AESO
+          CSVs manually from your browser to confirm access from your network.
         </p>
       </div>
     </main>
