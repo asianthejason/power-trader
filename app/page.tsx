@@ -261,10 +261,11 @@ async function loadNnTielinesForDate(
     const importMt = parseNum(cols[importMtIdx]);
     const importSk = parseNum(cols[importSkIdx]);
 
-    // *** KEY FIX: align with CSD sign convention ***
-    // Positive = net imports into Alberta, negative = net exports from Alberta.
+    // Positive = net imports into AB, negative = net exports.
     const net =
-      (importBc + importMt + importSk) -
+      importBc +
+      importMt +
+      importSk -
       (exportBc + exportMt + exportSk);
 
     map.set(he, Number.isFinite(net) ? net : null);
@@ -273,14 +274,137 @@ async function loadNnTielinesForDate(
   return map;
 }
 
-/* ---------- build main joined rows (price/load/wind/solar) ---------- */
+/* ---------- short-term renewables → HE averages ---------- */
+
+/**
+ * Parse a 12-hour short-term renewables CSV (wind or solar) and
+ * return a map HE → average actual MW for the given date.
+ *
+ * We treat each row's timestamp as an instantaneous MW reading and
+ * take the simple arithmetic mean of `Actual` within the hour.
+ *
+ * Example timestamp: "2025-11-20 10:40"
+ *   → hour = 10 → HE 11
+ */
+function parseShortTermCsvToHeMap(
+  csvText: string,
+  dateIso: string
+): Map<number, number | null> {
+  const lines = csvText
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+
+  const map = new Map<number, number | null>();
+  if (lines.length <= 1) return map;
+
+  const headers = lines[0].split(",").map((h) => h.trim().toLowerCase());
+
+  const timeIdx = headers.findIndex((h) => h.startsWith("time"));
+  const actualIdx = headers.findIndex((h) => h.startsWith("actual"));
+
+  if (timeIdx === -1 || actualIdx === -1) {
+    console.error(
+      "Short-term renewables CSV is missing Time/Actual columns."
+    );
+    return map;
+  }
+
+  const buckets: Record<number, number[]> = {};
+
+  for (let i = 1; i < lines.length; i++) {
+    const cols = lines[i].split(",");
+    if (cols.length <= Math.max(timeIdx, actualIdx)) continue;
+
+    const rawTime = cols[timeIdx]?.trim();
+    const rawActual = cols[actualIdx]?.trim();
+
+    if (!rawTime || !rawTime.startsWith(dateIso)) continue;
+
+    const parts = rawTime.split(" ");
+    if (parts.length < 2) continue;
+    const timePart = parts[1]; // "HH:MM" or "HH:MM:SS"
+    const hourStr = timePart.slice(0, 2);
+    const hour = Number(hourStr);
+    if (!Number.isFinite(hour)) continue;
+
+    const he = hour + 1; // hour 0..23 → HE 1..24
+    if (he < 1 || he > 24) continue;
+
+    if (!rawActual || rawActual === "-" || rawActual === "--") continue;
+    const val = Number(rawActual);
+    if (!Number.isFinite(val)) continue;
+
+    if (!buckets[he]) buckets[he] = [];
+    buckets[he].push(val);
+  }
+
+  for (const [heStr, arr] of Object.entries(buckets)) {
+    const he = Number(heStr);
+    if (!arr.length) continue;
+    const avg = arr.reduce((sum, v) => sum + v, 0) / arr.length;
+    map.set(he, avg);
+  }
+
+  return map;
+}
+
+/**
+ * Fetch 12-hour short-term wind & solar CSVs and convert them to
+ * HE-level average actual MW for the given ISO date (YYYY-MM-DD).
+ */
+async function fetchShortTermHeMaps(dateIso: string): Promise<{
+  windByHe: Map<number, number | null>;
+  solarByHe: Map<number, number | null>;
+}> {
+  const WIND_URL =
+    "https://reports.aeso.ca/short-term/wind/wind_rpt_shortterm.csv";
+  const SOLAR_URL =
+    "https://reports.aeso.ca/short-term/solar/solar_rpt_shortterm.csv";
+
+  try {
+    const [windRes, solarRes] = await Promise.all([
+      fetch(WIND_URL),
+      fetch(SOLAR_URL),
+    ]);
+
+    const [windCsv, solarCsv] = await Promise.all([
+      windRes.ok ? windRes.text() : Promise.resolve(""),
+      solarRes.ok ? solarRes.text() : Promise.resolve(""),
+    ]);
+
+    const windByHe =
+      windCsv.trim().length > 0
+        ? parseShortTermCsvToHeMap(windCsv, dateIso)
+        : new Map<number, number | null>();
+
+    const solarByHe =
+      solarCsv.trim().length > 0
+        ? parseShortTermCsvToHeMap(solarCsv, dateIso)
+        : new Map<number, number | null>();
+
+    return { windByHe, solarByHe };
+  } catch (err) {
+    console.error("Error fetching short-term renewables:", err);
+    return {
+      windByHe: new Map<number, number | null>(),
+      solarByHe: new Map<number, number | null>(),
+    };
+  }
+}
+
+/* ---------- build main joined rows (price/load) ---------- */
 
 /**
  * Build joined rows that look like the Excel "Supply Cushion" tab.
  *
- * NOTE: Tielines are *not* filled here – we fill NN tielines from
- * nn-history.csv and today tielines from AESO CSD later so that
- * everything shown is real AESO data, not synthetic.
+ * NOTE:
+ * - Tielines, wind and solar are *not* filled here. We fill NN
+ *   tielines from nn-history.csv, today tielines from CSD, and
+ *   RT wind/solar from the short-term renewables CSV later so that
+ *   everything shown is grounded in AESO data.
+ * - For now NN wind/solar are left null because we do not yet
+ *   maintain an AESO-based historical HE renewables dataset.
  */
 function buildJoinedRows(
   todayStates: HourlyState[],
@@ -309,16 +433,6 @@ function buildJoinedRows(
     const dLoad =
       nnLoad != null && rtLoad != null ? rtLoad - nnLoad : null;
 
-    const nnWind = nn?.windActual ?? null;
-    const rtWind = today.windActual ?? null;
-    const dWind =
-      nnWind != null && rtWind != null ? rtWind - nnWind : null;
-
-    const nnSolar = nn?.solarActual ?? null;
-    const rtSolar = today.solarActual ?? null;
-    const dSolar =
-      nnSolar != null && rtSolar != null ? rtSolar - nnSolar : null;
-
     const todayCushion = today.cushionMw ?? null;
     const nnCushion = nn?.cushionMw ?? null;
     let hourlySupplyDelta: number | null = null;
@@ -341,12 +455,12 @@ function buildJoinedRows(
       nnTielines: null,
       rtTielines: null,
       dTielines: null,
-      nnWind,
-      rtWind,
-      dWind,
-      nnSolar,
-      rtSolar,
-      dSolar,
+      nnWind: null,
+      rtWind: null,
+      dWind: null,
+      nnSolar: null,
+      rtSolar: null,
+      dSolar: null,
       hourlySupplyDelta,
       cumulativeSupplyDelta:
         hourlySupplyDelta != null ? cumulativeSupplyDelta : null,
@@ -424,6 +538,17 @@ export default async function DashboardPage() {
 
   const rows: JoinedRow[] = buildJoinedRows(todayStates, nnStates);
 
+  // Fetch HE-average actual wind & solar for today's date
+  const todayDateIso = todayStates[0]?.date;
+  let windByHe = new Map<number, number | null>();
+  let solarByHe = new Map<number, number | null>();
+
+  if (todayDateIso) {
+    const shortTerm = await fetchShortTermHeMaps(todayDateIso);
+    windByHe = shortTerm.windByHe;
+    solarByHe = shortTerm.solarByHe;
+  }
+
   // If we have a proper nearest-neighbour result, overwrite NN price/load
   // so the dashboard matches the /nearest-neighbour page.
   if (nnResult && nnResult.rows?.length) {
@@ -487,12 +612,36 @@ export default async function DashboardPage() {
     }
   }
 
-  // After NN + today tielines are filled, compute Δ Tielines
+  // Fill RT wind/solar from HE-average short-term renewables
+  if (windByHe.size || solarByHe.size) {
+    for (const row of rows) {
+      const w = windByHe.get(row.he);
+      if (w != null) row.rtWind = w;
+
+      const s = solarByHe.get(row.he);
+      if (s != null) row.rtSolar = s;
+    }
+  }
+
+  // For now NN wind/solar are left null (no AESO-based historical series),
+  // so Δ Wind / Δ Solar will also be null.
   for (const row of rows) {
     if (row.nnTielines != null && row.rtTielines != null) {
       row.dTielines = row.rtTielines - row.nnTielines;
     } else {
       row.dTielines = null;
+    }
+
+    if (row.nnWind != null && row.rtWind != null) {
+      row.dWind = row.rtWind - row.nnWind;
+    } else {
+      row.dWind = null;
+    }
+
+    if (row.nnSolar != null && row.rtSolar != null) {
+      row.dSolar = row.rtSolar - row.nnSolar;
+    } else {
+      row.dSolar = null;
     }
   }
 
@@ -508,8 +657,9 @@ export default async function DashboardPage() {
           </h1>
           <p className="mt-1 max-w-2xl text-sm text-slate-400">
             Supply cushion and nearest-neighbour view built from AESO
-            Actual/Forecast WMRQH, historical NN curves, and live CSD
-            interchange. No synthetic model data is used on this page.
+            Actual/Forecast WMRQH, historical NN curves, live CSD
+            interchange, and short-term renewables data. No synthetic
+            model curves are used on this page.
           </p>
         </header>
 
@@ -598,7 +748,7 @@ export default async function DashboardPage() {
               <p className="text-xs text-slate-400">
                 Each row is an hour ending (HE). Left block shows your analogue
                 day (NN) price and cushion deltas; middle blocks compare NN vs
-                real-time load, tielines, wind, and solar; right block tracks
+                real-time load, tielines, and renewables; right block tracks
                 hourly and cumulative supply deltas, similar to your Excel
                 view.
               </p>
