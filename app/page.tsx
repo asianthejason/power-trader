@@ -172,6 +172,8 @@ function buildJoinedRows(
 /**
  * For the “today” side, figure out whether each HE’s load/price
  * is coming from AESO actuals or forecasts, based on the WMRQH rows.
+ * Also return the *value* we should display for price (actual if
+ * available, else forecast).
  */
 function buildSourceMapsForToday(
   allRows: AesoActualForecastRow[],
@@ -179,12 +181,14 @@ function buildSourceMapsForToday(
 ): {
   priceSourceByHe: Map<number, PriceSource>;
   loadSourceByHe: Map<number, PriceSource>;
+  priceValueByHe: Map<number, number | null>;
 } {
   const priceSourceByHe = new Map<number, PriceSource>();
   const loadSourceByHe = new Map<number, PriceSource>();
+  const priceValueByHe = new Map<number, number | null>();
 
   if (!todayStates.length || !allRows.length) {
-    return { priceSourceByHe, loadSourceByHe };
+    return { priceSourceByHe, loadSourceByHe, priceValueByHe };
   }
 
   const dateIso = todayStates[0].date;
@@ -192,10 +196,13 @@ function buildSourceMapsForToday(
 
   for (const r of todaysRows) {
     let priceSource: PriceSource = null;
+    let priceValue: number | null = null;
     if (r.actualPoolPrice != null) {
       priceSource = "actual";
+      priceValue = r.actualPoolPrice;
     } else if (r.forecastPoolPrice != null) {
       priceSource = "forecast";
+      priceValue = r.forecastPoolPrice;
     }
 
     let loadSource: PriceSource = null;
@@ -207,9 +214,10 @@ function buildSourceMapsForToday(
 
     priceSourceByHe.set(r.he, priceSource);
     loadSourceByHe.set(r.he, loadSource);
+    priceValueByHe.set(r.he, priceValue);
   }
 
-  return { priceSourceByHe, loadSourceByHe };
+  return { priceSourceByHe, loadSourceByHe, priceValueByHe };
 }
 
 export default async function DashboardPage() {
@@ -252,10 +260,20 @@ export default async function DashboardPage() {
   }
 
   // Build “actual vs forecast” source maps for today’s side
-  const { priceSourceByHe, loadSourceByHe } = buildSourceMapsForToday(
-    aesoRows,
-    todayStates
-  );
+  const {
+    priceSourceByHe,
+    loadSourceByHe,
+    priceValueByHe,
+  } = buildSourceMapsForToday(aesoRows, todayStates);
+
+  // Override todayPrice so it always matches the WMRQH logic:
+  // actual price where published, otherwise forecast price.
+  for (const row of rows) {
+    const val = priceValueByHe.get(row.he);
+    if (val != null) {
+      row.todayPrice = val;
+    }
+  }
 
   const comparisonDate =
     nnResult && nnResult.nnDate ? nnResult.nnDate : "";
@@ -284,7 +302,9 @@ export default async function DashboardPage() {
             </p>
             <p className="mt-2 text-3xl font-semibold">
               {formatNumber(now?.cushionMw, 0)}{" "}
-              <span className="text-base font-normal text-slate-400">MW</span>
+              <span className="text-base font-normal text-slate-400">
+                MW
+              </span>
             </p>
             <p className="mt-1 text-xs text-slate-400">
               {now && Number.isFinite(now.cushionPercent)
@@ -316,7 +336,9 @@ export default async function DashboardPage() {
             </p>
             <p className="mt-2 text-3xl font-semibold">
               {formatNumber(now?.actualLoad, 0)}{" "}
-              <span className="text-base font-normal text-slate-400">MW</span>
+              <span className="text-base font-normal text-slate-400">
+                MW
+              </span>
             </p>
             <p className="mt-1 text-xs text-slate-400">
               Forecast: {formatNumber(now?.forecastLoad, 0)} MW
@@ -425,6 +447,7 @@ export default async function DashboardPage() {
                     priceSourceByHe.get(row.he) ?? null;
                   const loadSource = loadSourceByHe.get(row.he) ?? null;
 
+                  // Colour: actual = green, forecast = blue
                   const todayPriceClass =
                     priceSource === "actual"
                       ? "text-emerald-400"
@@ -512,7 +535,7 @@ export default async function DashboardPage() {
                           : "—"}
                       </td>
 
-                      {/* AESO SD price (today price) – colour by actual vs forecast */}
+                      {/* AESO SD price (today price) – actual vs forecast colouring */}
                       <td className={"px-3 py-2 " + todayPriceClass}>
                         {row.todayPrice != null
                           ? `$${formatNumber(row.todayPrice, 2)}`
