@@ -17,6 +17,10 @@ const AESO_WIND_12H_URL =
 const AESO_SOLAR_12H_URL =
   "http://ets.aeso.ca/Market/Reports/Manual/Operations/prodweb_reports/wind_solar_forecast/solar_rpt_shortterm.csv";
 
+// Internal HTTPS proxy endpoints for downloads (see route files below)
+const SOLAR_DOWNLOAD_PATH = "/api/aeso/solar-shortterm-csv";
+const WIND_DOWNLOAD_PATH = "/api/aeso/wind-shortterm-csv";
+
 /* ---------- small helpers ---------- */
 
 function formatNumber(n: number | null | undefined, decimals = 0) {
@@ -222,18 +226,20 @@ export default async function RenewablesPage() {
             </p>
           </div>
 
-          {/* Action buttons */}
+          {/* Action buttons – hit our HTTPS proxy routes, not http:// AESO directly */}
           <div className="flex flex-wrap gap-2 text-xs">
             <a
-              href={AESO_SOLAR_12H_URL}
-              download
+              href={SOLAR_DOWNLOAD_PATH}
+              target="_blank"
+              rel="noreferrer"
               className="inline-flex items-center rounded-full border border-slate-700 bg-slate-900/80 px-3 py-1 font-medium text-slate-100 hover:bg-slate-900"
             >
               Download Solar CSV
             </a>
             <a
-              href={AESO_WIND_12H_URL}
-              download
+              href={WIND_DOWNLOAD_PATH}
+              target="_blank"
+              rel="noreferrer"
               className="inline-flex items-center rounded-full border border-slate-700 bg-slate-900/80 px-3 py-1 font-medium text-slate-100 hover:bg-slate-900"
             >
               Download Wind CSV
@@ -295,13 +301,12 @@ export default async function RenewablesPage() {
                         className="px-3 py-3 text-[11px] text-slate-400"
                         colSpan={6}
                       >
-                        No solar data rows available. If this persists, open the
-                        &quot;Download Solar CSV&quot; link above to confirm
-                        you can download{" "}
+                        No solar data rows available. If this persists, use the
+                        download button above to pull{" "}
                         <span className="font-mono">
                           solar_rpt_shortterm.csv
                         </span>{" "}
-                        from your network.
+                        directly and check the raw file.
                       </td>
                     </tr>
                   ) : (
@@ -395,13 +400,12 @@ export default async function RenewablesPage() {
                         className="px-3 py-3 text-[11px] text-slate-400"
                         colSpan={6}
                       >
-                        No wind data rows available. If this persists, open the
-                        &quot;Download Wind CSV&quot; link above to confirm you
-                        can download{" "}
+                        No wind data rows available. If this persists, use the
+                        download button above to pull{" "}
                         <span className="font-mono">
                           wind_rpt_shortterm.csv
                         </span>{" "}
-                        from your network.
+                        directly and check the raw file.
                       </td>
                     </tr>
                   ) : (
