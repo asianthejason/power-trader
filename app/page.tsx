@@ -606,25 +606,20 @@ function buildJoinedRows(
 /* ---------- WMRQH “actual vs forecast” source maps ---------- */
 
 function buildSourceMapsForToday(
-  allRows: AesoActualForecastRow[],
-  todayStates: HourlyState[]
+  todaysRows: AesoActualForecastRow[]
 ): {
   priceSourceByHe: Map<number, PriceSource>;
   loadSourceByHe: Map<number, PriceSource>;
   priceValueByHe: Map<number, number | null>;
+  loadValueByHe: Map<number, number | null>;
 } {
   const priceSourceByHe = new Map<number, PriceSource>();
   const loadSourceByHe = new Map<number, PriceSource>();
   const priceValueByHe = new Map<number, number | null>();
-
-  if (!todayStates.length || !allRows.length) {
-    return { priceSourceByHe, loadSourceByHe, priceValueByHe };
-  }
-
-  const dateIso = todayStates[0].date;
-  const todaysRows = allRows.filter((r) => r.date === dateIso);
+  const loadValueByHe = new Map<number, number | null>();
 
   for (const r of todaysRows) {
+    // Price: actual first, else forecast
     let priceSource: PriceSource = null;
     let priceValue: number | null = null;
     if (r.actualPoolPrice != null) {
@@ -635,19 +630,24 @@ function buildSourceMapsForToday(
       priceValue = r.forecastPoolPrice;
     }
 
+    // Load (AIL)
     let loadSource: PriceSource = null;
+    let loadValue: number | null = null;
     if (r.actualAil != null) {
       loadSource = "actual";
+      loadValue = r.actualAil;
     } else if (r.forecastAil != null) {
       loadSource = "forecast";
+      loadValue = r.forecastAil;
     }
 
     priceSourceByHe.set(r.he, priceSource);
     loadSourceByHe.set(r.he, loadSource);
     priceValueByHe.set(r.he, priceValue);
+    loadValueByHe.set(r.he, loadValue);
   }
 
-  return { priceSourceByHe, loadSourceByHe, priceValueByHe };
+  return { priceSourceByHe, loadSourceByHe, priceValueByHe, loadValueByHe };
 }
 
 /* ---------- main page ---------- */
@@ -663,12 +663,22 @@ export default async function DashboardPage() {
     ]);
 
   const summary = summarizeDay(todayStates);
-  const now = summary.current;
-
   const rows: JoinedRow[] = buildJoinedRows(todayStates, nnStates);
 
+  const todayDateIso = todayStates[0]?.date ?? null;
+  const todaysAesoRows = todayDateIso
+    ? aesoRows.filter((r) => r.date === todayDateIso)
+    : [];
+
+  // Maps for "actual vs forecast" price/load and the underlying values
+  const {
+    priceSourceByHe,
+    loadSourceByHe,
+    priceValueByHe,
+    loadValueByHe,
+  } = buildSourceMapsForToday(todaysAesoRows);
+
   // Fetch HE-average wind & solar for today's date (Actual, else Most Likely)
-  const todayDateIso = todayStates[0]?.date;
   let windByHe = new Map<number, number | null>();
   let solarByHe = new Map<number, number | null>();
   let windSourceByHe = new Map<number, RenewableSource>();
@@ -703,19 +713,20 @@ export default async function DashboardPage() {
     }
   }
 
-  // Build “actual vs forecast” source maps for today’s pool price & load
-  const {
-    priceSourceByHe,
-    loadSourceByHe,
-    priceValueByHe,
-  } = buildSourceMapsForToday(aesoRows, todayStates);
-
   // Override todayPrice so it always matches the WMRQH logic:
   // actual price where published, otherwise forecast price.
   for (const row of rows) {
     const val = priceValueByHe.get(row.he);
     if (val != null) {
       row.todayPrice = val;
+    }
+  }
+
+  // Also override RT load with WMRQH (actual/forecast AIL) where available.
+  for (const row of rows) {
+    const loadVal = loadValueByHe.get(row.he);
+    if (loadVal != null) {
+      row.rtLoad = loadVal;
     }
   }
 
@@ -728,10 +739,11 @@ export default async function DashboardPage() {
     }
   }
 
-  // Map today’s *current* net interchange from CSD onto the *current Alberta HE* row.
+  // Determine current HE in Alberta
   const { nowAb } = approxAlbertaNow();
   const currentHeAb = nowAb.getHours() + 1; // 0..23 → HE 1..24
 
+  // Map today’s *current* net interchange from CSD onto the *current Alberta HE* row.
   if (csdSnapshot.systemNetInterchangeMw != null) {
     const target = rows.find((r) => r.he === currentHeAb);
     if (target) {
@@ -820,6 +832,40 @@ export default async function DashboardPage() {
     }
   }
 
+  // --------- Build "current" snapshot for the 4 cards ---------
+  const todayByHe = new Map<number, HourlyState>(
+    todayStates.map((s) => [s.he, s])
+  );
+  const todaysAesoByHe = new Map<number, AesoActualForecastRow>(
+    todaysAesoRows.map((r) => [r.he, r])
+  );
+
+  const nowState = todayByHe.get(currentHeAb);
+  const nowAeso = todaysAesoByHe.get(currentHeAb);
+
+  const currentCushionMw = nowState?.cushionMw ?? null;
+  const currentLoadForPct =
+    loadValueByHe.get(currentHeAb) ??
+    nowState?.actualLoad ??
+    nowState?.forecastLoad ??
+    null;
+
+  const currentCushionPercent =
+    currentCushionMw != null &&
+    currentLoadForPct != null &&
+    currentLoadForPct !== 0
+      ? currentCushionMw / currentLoadForPct
+      : null;
+
+  const currentPoolPrice = priceValueByHe.get(currentHeAb) ?? null;
+  const currentForecastPrice = nowAeso?.forecastPoolPrice ?? null;
+  const currentSmp = (nowAeso as any)?.smp ?? nowState?.smp ?? null;
+
+  const currentActualLoad = loadValueByHe.get(currentHeAb) ?? null;
+  const currentForecastLoad = nowAeso?.forecastAil ?? null;
+
+  const currentFlag = nowState?.cushionFlag;
+
   const comparisonDate =
     nnResult && nnResult.nnDate ? nnResult.nnDate : "";
 
@@ -844,55 +890,55 @@ export default async function DashboardPage() {
 
         {/* Top stats */}
         <section className="mt-4 grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+          {/* Current cushion */}
           <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
             <p className="text-xs uppercase tracking-wide text-slate-400">
               Current Cushion
             </p>
             <p className="mt-2 text-3xl font-semibold">
-              {formatNumber(now?.cushionMw, 0)}{" "}
+              {formatNumber(currentCushionMw, 0)}{" "}
               <span className="text-base font-normal text-slate-400">
                 MW
               </span>
             </p>
             <p className="mt-1 text-xs text-slate-400">
-              {now && Number.isFinite(now.cushionPercent)
-                ? `${(now.cushionPercent * 100).toFixed(1)}% of load`
+              {currentCushionPercent != null
+                ? `${(currentCushionPercent * 100).toFixed(1)}% of load`
                 : "—"}
             </p>
           </div>
 
+          {/* Price card */}
           <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
             <p className="text-xs uppercase tracking-wide text-slate-400">
               Price (Pool / SMP)
             </p>
             <p className="mt-2 text-3xl font-semibold">
-              $
-              {formatNumber(
-                now?.actualPoolPrice ?? now?.forecastPoolPrice ?? null,
-                0
-              )}
+              ${formatNumber(currentPoolPrice, 0)}
             </p>
             <p className="mt-1 text-xs text-slate-400">
-              Forecast: ${formatNumber(now?.forecastPoolPrice, 0)} · SMP: $
-              {formatNumber(now?.smp, 0)}
+              Forecast: ${formatNumber(currentForecastPrice, 0)} · SMP: $
+              {formatNumber(currentSmp, 0)}
             </p>
           </div>
 
+          {/* Load card */}
           <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
             <p className="text-xs uppercase tracking-wide text-slate-400">
               Load (AIL)
             </p>
             <p className="mt-2 text-3xl font-semibold">
-              {formatNumber(now?.actualLoad, 0)}{" "}
+              {formatNumber(currentActualLoad, 0)}{" "}
               <span className="text-base font-normal text-slate-400">
                 MW
               </span>
             </p>
             <p className="mt-1 text-xs text-slate-400">
-              Forecast: {formatNumber(now?.forecastLoad, 0)} MW
+              Forecast: {formatNumber(currentForecastLoad, 0)} MW
             </p>
           </div>
 
+          {/* System status */}
           <div className="flex flex-col justify-between rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
             <div>
               <p className="text-xs uppercase tracking-wide text-slate-400">
@@ -901,11 +947,11 @@ export default async function DashboardPage() {
               <div
                 className={
                   "mt-2 inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium " +
-                  cushionFlagClass(now?.cushionFlag)
+                  cushionFlagClass(currentFlag)
                 }
               >
                 <span className="inline-block h-2 w-2 rounded-full bg-current" />
-                {cushionFlagLabel(now?.cushionFlag)}
+                {cushionFlagLabel(currentFlag)}
               </div>
             </div>
             <p className="mt-3 text-xs text-slate-400">
@@ -989,7 +1035,7 @@ export default async function DashboardPage() {
               </thead>
               <tbody>
                 {rows.map((row) => {
-                  const isCurrent = now && row.he === now.he;
+                  const isCurrent = row.he === currentHeAb;
 
                   const priceSource = priceSourceByHe.get(row.he) ?? null;
                   const loadSource = loadSourceByHe.get(row.he) ?? null;
