@@ -93,7 +93,7 @@ type IntertieSnapshot = {
   path: IntertiePath;
   counterparty: string;
   // Net actual flow from AESO CSD, MW.
-  // Positive = net imports into Alberta, negative = net exports from Alberta.
+  // Positive = net exports from Alberta, negative = net imports into Alberta.
   actualFlowMw: number | null;
 };
 
@@ -186,12 +186,11 @@ async function fetchAesoInterchangeSnapshot(): Promise<IntertieSnapshotResult> {
  *   date,he,actual_pool_price,actual_ail,hour_ahead_pool_price_forecast,
  *   export_bc,export_mt,export_sk,import_bc,import_mt,import_sk
  *
- * We define net tielines here with the same sign convention
- * as Net Actual Interchange from CSD:
+ * Net tielines here are defined with **exports positive, imports negative**:
  *
- *   net = (imports into AB) - (exports from AB)
+ *   net = (exports from AB) - (imports into AB)
  *
- * So positive = net imports into Alberta, negative = net exports.
+ * So positive = net exports from Alberta, negative = net imports.
  */
 async function loadNnTielinesForDate(
   dateIso: string
@@ -261,12 +260,9 @@ async function loadNnTielinesForDate(
     const importMt = parseNum(cols[importMtIdx]);
     const importSk = parseNum(cols[importSkIdx]);
 
-    // Positive = net imports into AB, negative = net exports.
+    // Exports positive, imports negative: net = exports - imports
     const net =
-      importBc +
-      importMt +
-      importSk -
-      (exportBc + exportMt + exportSk);
+      exportBc + exportMt + exportSk - (importBc + importMt + importSk);
 
     map.set(he, Number.isFinite(net) ? net : null);
   }
@@ -283,7 +279,7 @@ async function loadNnTielinesForDate(
  * We treat each row's timestamp as an instantaneous MW reading and
  * take the simple arithmetic mean of `Actual` within the hour.
  *
- * Example timestamp: "2025-11-20 10:40"
+ * Example timestamp in CSV: "2025-11-20 10:40"
  *   → hour = 10 → HE 11
  */
 function parseShortTermCsvToHeMap(
@@ -319,11 +315,13 @@ function parseShortTermCsvToHeMap(
     const rawTime = cols[timeIdx]?.trim();
     const rawActual = cols[actualIdx]?.trim();
 
-    if (!rawTime || !rawTime.startsWith(dateIso)) continue;
+    if (!rawTime) continue;
 
-    const parts = rawTime.split(" ");
-    if (parts.length < 2) continue;
-    const timePart = parts[1]; // "HH:MM" or "HH:MM:SS"
+    // First 10 characters are the date in the CSV (e.g. "2025-11-20" or "2025/11/20")
+    const datePart = rawTime.slice(0, 10).replace(/\//g, "-");
+    if (datePart !== dateIso) continue;
+
+    const timePart = rawTime.slice(11); // "HH:MM" or "HH:MM:SS"
     const hourStr = timePart.slice(0, 2);
     const hour = Number(hourStr);
     if (!Number.isFinite(hour)) continue;
@@ -332,7 +330,10 @@ function parseShortTermCsvToHeMap(
     if (he < 1 || he > 24) continue;
 
     if (!rawActual || rawActual === "-" || rawActual === "--") continue;
-    const val = Number(rawActual);
+
+    // Strip commas (e.g. "1,031" → "1031") before Number()
+    const cleaned = rawActual.replace(/,/g, "");
+    const val = Number(cleaned);
     if (!Number.isFinite(val)) continue;
 
     if (!buckets[he]) buckets[he] = [];
@@ -590,7 +591,7 @@ export default async function DashboardPage() {
     }
   }
 
-  // Load NN tielines from nn-history.csv (positive = imports into AB)
+  // Load NN tielines from nn-history.csv (exports positive)
   if (nnResult && nnResult.nnDate) {
     const nnTielinesMap = await loadNnTielinesForDate(nnResult.nnDate);
     for (const row of rows) {
@@ -623,8 +624,7 @@ export default async function DashboardPage() {
     }
   }
 
-  // For now NN wind/solar are left null (no AESO-based historical series),
-  // so Δ Wind / Δ Solar will also be null.
+  // Compute deltas where we have both sides
   for (const row of rows) {
     if (row.nnTielines != null && row.rtTielines != null) {
       row.dTielines = row.rtTielines - row.nnTielines;
