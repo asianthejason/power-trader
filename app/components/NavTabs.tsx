@@ -2,7 +2,7 @@
 import Link from "next/link";
 
 const tabs = [
-  { href: "/", label: "Dashboard" },
+  { href: "/", label: "Supply Cushion" },
   { href: "/nearest-neighbour", label: "Nearest Neighbour" },
   { href: "/renewables", label: "Renewables" },
   { href: "/interties", label: "Interties" },

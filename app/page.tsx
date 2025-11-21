@@ -4,7 +4,6 @@ import {
   getTodayHourlyStates,
   getNearestNeighbourStates,
   getTodayVsNearestNeighbourFromHistory,
-  summarizeDay,
   fetchAesoActualForecastRows,
   type HourlyState,
   type AesoActualForecastRow,
@@ -23,32 +22,6 @@ function formatNumber(n: number | null | undefined, decimals = 0) {
     minimumFractionDigits: decimals,
     maximumFractionDigits: decimals,
   });
-}
-
-function cushionFlagLabel(flag: string | undefined) {
-  switch (flag) {
-    case "tight":
-      return "Tight";
-    case "watch":
-      return "Watch";
-    case "comfortable":
-      return "Comfortable";
-    default:
-      return "Unknown";
-  }
-}
-
-function cushionFlagClass(flag: string | undefined) {
-  switch (flag) {
-    case "tight":
-      return "bg-red-500/10 text-red-400 border-red-500/40";
-    case "watch":
-      return "bg-amber-500/10 text-amber-400 border-amber-500/40";
-    case "comfortable":
-      return "bg-emerald-500/10 text-emerald-400 border-emerald-500/40";
-    default:
-      return "bg-slate-700/40 text-slate-300 border-slate-500/40";
-  }
 }
 
 /* ---------- types for joined dashboard rows ---------- */
@@ -662,7 +635,6 @@ export default async function DashboardPage() {
       fetchAesoInterchangeSnapshot(),
     ]);
 
-  const summary = summarizeDay(todayStates);
   const rows: JoinedRow[] = buildJoinedRows(todayStates, nnStates);
 
   const todayDateIso = todayStates[0]?.date ?? null;
@@ -832,105 +804,6 @@ export default async function DashboardPage() {
     }
   }
 
-  // --------- Build "current" snapshot for the 4 cards ---------
-  const todayByHe = new Map<number, HourlyState>(
-    todayStates.map((s) => [s.he, s])
-  );
-  const todaysAesoByHe = new Map<number, AesoActualForecastRow>(
-    todaysAesoRows.map((r) => [r.he, r])
-  );
-
-  const nowState = todayByHe.get(currentHeAb);
-  const nowAeso = todaysAesoByHe.get(currentHeAb);
-  const currentRow = rows.find((r) => r.he === currentHeAb) || null;
-
-  const currentCushionMw = nowState?.cushionMw ?? null;
-  const currentLoadForPct =
-    loadValueByHe.get(currentHeAb) ??
-    nowState?.actualLoad ??
-    nowState?.forecastLoad ??
-    null;
-
-  const currentCushionPercent =
-    currentCushionMw != null &&
-    currentLoadForPct != null &&
-    currentLoadForPct !== 0
-      ? currentCushionMw / currentLoadForPct
-      : null;
-
-  const currentPoolPrice = priceValueByHe.get(currentHeAb) ?? null;
-  const currentNnPrice = currentRow?.nnPrice ?? null;
-  const currentPriceDelta =
-    currentPoolPrice != null && currentNnPrice != null
-      ? currentPoolPrice - currentNnPrice
-      : null;
-
-  const currentForecastPrice = nowAeso?.forecastPoolPrice ?? null;
-  const currentSmp = (nowAeso as any)?.smp ?? nowState?.smp ?? null;
-
-  const currentActualLoad = loadValueByHe.get(currentHeAb) ?? null;
-  const currentForecastLoad = nowAeso?.forecastAil ?? null;
-
-  const currentWindMw = currentRow?.rtWind ?? null;
-  const currentSolarMw = currentRow?.rtSolar ?? null;
-  const currentRenewableShare =
-    currentActualLoad != null &&
-    currentWindMw != null &&
-    currentSolarMw != null &&
-    currentActualLoad !== 0
-      ? (currentWindMw + currentSolarMw) / currentActualLoad
-      : null;
-
-  const currentFlag = nowState?.cushionFlag;
-
-  // Net interchange summary for interties card
-  const netInterchangeMw = csdSnapshot.systemNetInterchangeMw ?? null;
-  let netInterchangeLabel: string;
-  if (netInterchangeMw == null) {
-    netInterchangeLabel = "Interchange unavailable";
-  } else if (netInterchangeMw > 0) {
-    netInterchangeLabel = `${formatNumber(
-      netInterchangeMw,
-      0
-    )} MW net exports`;
-  } else if (netInterchangeMw < 0) {
-    netInterchangeLabel = `${formatNumber(
-      Math.abs(netInterchangeMw),
-      0
-    )} MW net imports`;
-  } else {
-    netInterchangeLabel = "Balanced (0 MW net interchange)";
-  }
-
-  const intertieSummaries: string[] = [];
-  for (const r of csdSnapshot.rows) {
-    if (r.actualFlowMw == null) continue;
-    const dir =
-      r.actualFlowMw > 0
-        ? "export"
-        : r.actualFlowMw < 0
-        ? "import"
-        : "0 MW";
-    const absVal = Math.abs(r.actualFlowMw);
-    const short =
-      r.path === "AB-BC" ? "BC" : r.path === "AB-SK" ? "SK" : "MATL";
-    intertieSummaries.push(
-      `${short} ${dir} ${formatNumber(absVal, 0)} MW`
-    );
-  }
-
-  // Tightest cushion hour (for quick daily risk sense)
-  let tightestHeLabel: string | null = null;
-  let tightestCushionMw: number | null = null;
-  for (const s of todayStates) {
-    const c = s.cushionMw;
-    if (c == null || Number.isNaN(c)) continue;
-    if (tightestCushionMw == null || c < tightestCushionMw) {
-      tightestCushionMw = c;
-      tightestHeLabel = s.he.toString().padStart(2, "0");
-    }
-  }
-
   const comparisonDate =
     nnResult && nnResult.nnDate ? nnResult.nnDate : "";
 
@@ -953,134 +826,8 @@ export default async function DashboardPage() {
 
         <NavTabs />
 
-        {/* Top stats */}
-        <section className="mt-4 grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-          {/* 1. Current cushion vs NN */}
-          <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
-            <p className="text-xs uppercase tracking-wide text-slate-400">
-              Current Cushion
-            </p>
-            <p className="mt-2 text-3xl font-semibold">
-              {formatNumber(currentCushionMw, 0)}{" "}
-              <span className="text-base font-normal text-slate-400">
-                MW
-              </span>
-            </p>
-            <p className="mt-1 text-xs text-slate-400">
-              {currentCushionPercent != null
-                ? `${(currentCushionPercent * 100).toFixed(1)}% of load`
-                : "—"}
-              {currentRow?.nnCushionDelta != null && (
-                <>
-                  {" "}
-                  · vs NN:{" "}
-                  {currentRow.nnCushionDelta > 0 ? "+" : ""}
-                  {formatNumber(currentRow.nnCushionDelta, 0)} MW
-                </>
-              )}
-            </p>
-          </div>
-
-          {/* 2. Price vs NN */}
-          <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
-            <p className="text-xs uppercase tracking-wide text-slate-400">
-              Price (Pool) vs NN
-            </p>
-            <p className="mt-2 text-3xl font-semibold">
-              {currentPoolPrice != null
-                ? `$${formatNumber(currentPoolPrice, 0)}`
-                : "$—"}
-            </p>
-            <p className="mt-1 text-xs text-slate-400">
-              NN:{" "}
-              {currentNnPrice != null
-                ? `$${formatNumber(currentNnPrice, 0)}`
-                : "—"}
-              {currentPriceDelta != null && (
-                <>
-                  {" "}
-                  · Δ{" "}
-                  {currentPriceDelta > 0 ? "+" : ""}
-                  {formatNumber(currentPriceDelta, 0)}
-                </>
-              )}
-            </p>
-            <p className="mt-1 text-xs text-slate-400">
-              Forecast: ${formatNumber(currentForecastPrice, 0)} · SMP: $
-              {formatNumber(currentSmp, 0)}
-            </p>
-          </div>
-
-          {/* 3. Load & renewables share */}
-          <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
-            <p className="text-xs uppercase tracking-wide text-slate-400">
-              Load & Renewables (Now)
-            </p>
-            <p className="mt-2 text-3xl font-semibold">
-              {formatNumber(currentActualLoad, 0)}{" "}
-              <span className="text-base font-normal text-slate-400">
-                MW AIL
-              </span>
-            </p>
-            <p className="mt-1 text-xs text-slate-400">
-              {currentWindMw != null || currentSolarMw != null ? (
-                <>
-                  Wind {formatNumber(currentWindMw, 0)} MW · Solar{" "}
-                  {formatNumber(currentSolarMw, 0)} MW
-                  {currentRenewableShare != null && (
-                    <>
-                      {" "}
-                      ·{" "}
-                      {(currentRenewableShare * 100).toFixed(1)}% of load
-                    </>
-                  )}
-                </>
-              ) : (
-                "Wind / Solar data not available for this HE"
-              )}
-            </p>
-          </div>
-
-          {/* 4. System status & interties */}
-          <div className="flex flex-col justify-between rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
-            <div>
-              <p className="text-xs uppercase tracking-wide text-slate-400">
-                System Status & Interties
-              </p>
-              <div
-                className={
-                  "mt-2 inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium " +
-                  cushionFlagClass(currentFlag)
-                }
-              >
-                <span className="inline-block h-2 w-2 rounded-full bg-current" />
-                {cushionFlagLabel(currentFlag)}
-              </div>
-              <p className="mt-2 text-xs text-slate-400">
-                {netInterchangeLabel}
-              </p>
-              <p className="mt-1 text-[11px] text-slate-500">
-                {intertieSummaries.length
-                  ? intertieSummaries.join(" · ")
-                  : "Path detail unavailable"}
-              </p>
-            </div>
-            <p className="mt-3 text-xs text-slate-400">
-              Peak load today: {formatNumber(summary.peakLoad, 0)} MW · Max
-              price: ${formatNumber(summary.maxPrice, 0)}
-              {tightestHeLabel && (
-                <>
-                  {" "}
-                  · Tightest cushion: HE {tightestHeLabel} (
-                  {formatNumber(tightestCushionMw, 0)} MW)
-                </>
-              )}
-            </p>
-          </div>
-        </section>
-
         {/* Hourly supply cushion / NN table */}
-        <section className="mt-8 rounded-2xl border border-slate-800 bg-slate-900/80 p-4">
+        <section className="mt-6 rounded-2xl border border-slate-800 bg-slate-900/80 p-4">
           <div className="mb-3 flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
             <div>
               <h2 className="text-lg font-semibold tracking-tight">
