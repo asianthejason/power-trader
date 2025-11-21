@@ -1,5 +1,6 @@
 // app/nearest-neighbour/page.tsx
 
+import Link from "next/link";
 import NavTabs from "../components/NavTabs";
 import { getTodayVsNearestNeighbourFromHistory } from "../../lib/marketData";
 
@@ -31,16 +32,82 @@ type NearestNeighbourRow = {
   deltaLoad: number | null;
 };
 
-type NearestNeighbourResult = {
-  todayDate: string; // YYYY-MM-DD (Alberta)
-  nnDate: string; // YYYY-MM-DD (Alberta) – the chosen analogue day
+/**
+ * One candidate analogue day. `score` is optional and can be used
+ * to show the "distance" / fit quality if your backend provides it.
+ */
+type NearestNeighbourCandidate = {
+  nnDate: string;
   rows: NearestNeighbourRow[];
+  score?: number | null;
 };
 
-export default async function NearestNeighbourPage() {
-  const result = (await getTodayVsNearestNeighbourFromHistory()) as
-    | NearestNeighbourResult
+/**
+ * Flexible result type that supports:
+ *
+ * - v1 (current): { todayDate, nnDate, rows }
+ * - v2 (future): { todayDate, candidates: NearestNeighbourCandidate[] }
+ */
+type NearestNeighbourMultiResult = {
+  todayDate: string;
+  // v1 fields:
+  nnDate?: string;
+  rows?: NearestNeighbourRow[];
+  // v2 fields:
+  candidates?: NearestNeighbourCandidate[];
+};
+
+type PageProps = {
+  searchParams?: { [key: string]: string | string[] | undefined };
+};
+
+/* ---------- page ---------- */
+
+export default async function NearestNeighbourPage({
+  searchParams,
+}: PageProps) {
+  const raw = (await getTodayVsNearestNeighbourFromHistory()) as
+    | NearestNeighbourMultiResult
     | null;
+
+  // Normalise into a candidate list (up to 10).
+  let todayDate: string | null = raw?.todayDate ?? null;
+  let candidates: NearestNeighbourCandidate[] = [];
+
+  if (raw) {
+    if (raw.candidates && raw.candidates.length > 0) {
+      // New multi-candidate shape
+      candidates = raw.candidates.slice(0, 10);
+    } else if (raw.nnDate && raw.rows) {
+      // Legacy single-candidate shape
+      candidates = [{ nnDate: raw.nnDate, rows: raw.rows }];
+    }
+  }
+
+  const hasResult = !!raw && candidates.length > 0;
+
+  // Determine which candidate is selected based on ?nnRank=1..N
+  const rankParamRaw =
+    (typeof searchParams?.nnRank === "string"
+      ? searchParams?.nnRank
+      : undefined) ??
+    (typeof searchParams?.nn === "string"
+      ? searchParams?.nn
+      : undefined);
+
+  let selectedIndex = 0;
+  if (rankParamRaw && candidates.length > 0) {
+    const parsed = Number(rankParamRaw);
+    if (
+      Number.isFinite(parsed) &&
+      parsed >= 1 &&
+      parsed <= candidates.length
+    ) {
+      selectedIndex = parsed - 1;
+    }
+  }
+
+  const selectedCandidate = hasResult ? candidates[selectedIndex] : null;
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100">
@@ -57,13 +124,14 @@ export default async function NearestNeighbourPage() {
                 <span className="font-medium text-slate-200">
                   today&apos;s AESO load and price profile
                 </span>{" "}
-                to a{" "}
+                to{" "}
                 <span className="font-medium text-slate-200">
-                  similar historical day from AESO data
+                  similar historical days from AESO data
                 </span>
                 . Today&apos;s curve is built from the AESO Actual/Forecast
-                (WMRQH) report, and the analogue day is chosen from historical
-                hourly pool price and AIL based on a combined match of{" "}
+                (WMRQH) report, and candidate analogue days are chosen from
+                historical hourly pool price and AIL based on a combined match
+                of{" "}
                 <span className="font-medium text-slate-200">
                   load shape and price shape
                 </span>
@@ -71,22 +139,30 @@ export default async function NearestNeighbourPage() {
               </p>
             </div>
 
-            {result && (
+            {hasResult && selectedCandidate && (
               <dl className="mt-2 grid gap-2 text-xs text-slate-400 sm:text-right">
                 <div>
                   <dt className="inline text-slate-500">Today (Alberta): </dt>
                   <dd className="inline font-medium text-slate-200">
-                    {result.todayDate || "—"}
+                    {todayDate || "—"}
                   </dd>
                 </div>
                 <div>
                   <dt className="inline text-slate-500">
-                    Nearest neighbour day:{" "}
+                    Selected neighbour day:{" "}
                   </dt>
                   <dd className="inline font-medium text-slate-200">
-                    {result.nnDate || "—"}
+                    {selectedCandidate.nnDate || "—"}
                   </dd>
                 </div>
+                {candidates.length > 1 && (
+                  <div>
+                    <dt className="inline text-slate-500">Candidate rank: </dt>
+                    <dd className="inline font-medium text-slate-200">
+                      #{selectedIndex + 1} of {candidates.length}
+                    </dd>
+                  </div>
+                )}
               </dl>
             )}
           </div>
@@ -94,7 +170,7 @@ export default async function NearestNeighbourPage() {
 
         <NavTabs />
 
-        {!result ? (
+        {!hasResult || !selectedCandidate ? (
           <section className="mt-4 rounded-2xl border border-slate-800 bg-slate-900/80 p-4 text-sm text-slate-300">
             Unable to compute a nearest neighbour using the available AESO
             data. Check that:
@@ -109,13 +185,50 @@ export default async function NearestNeighbourPage() {
                 </code>
                 ) contains at least one full day of hourly pool price and AIL.
               </li>
+              <li>
+                (Optional) Your NN backend provides multiple candidates in
+                descending similarity if you want the top 10 tabs populated.
+              </li>
             </ul>
           </section>
         ) : (
           <section className="mt-4 rounded-2xl border border-slate-800 bg-slate-900/80 p-4">
+            {/* Candidate tabs */}
+            {candidates.length > 1 && (
+              <div className="mb-4 flex flex-wrap gap-1.5">
+                {candidates.map((cand, idx) => {
+                  const isActive = idx === selectedIndex;
+                  const rank = idx + 1;
+                  return (
+                    <Link
+                      key={cand.nnDate + "-" + idx}
+                      href={`/nearest-neighbour?nnRank=${rank}`}
+                      scroll={false}
+                      className={
+                        "inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-medium transition " +
+                        (isActive
+                          ? "border-emerald-500/80 bg-emerald-900/60 text-emerald-100"
+                          : "border-slate-700 bg-slate-900/60 text-slate-300 hover:border-slate-500 hover:bg-slate-800/70")
+                      }
+                    >
+                      <span className="mr-1 text-[10px] text-slate-400">
+                        #{rank}
+                      </span>
+                      <span className="font-mono">{cand.nnDate}</span>
+                      {typeof cand.score === "number" && (
+                        <span className="ml-2 text-[10px] text-slate-400">
+                          score {cand.score.toFixed(2)}
+                        </span>
+                      )}
+                    </Link>
+                  );
+                })}
+              </div>
+            )}
+
             <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
               <h2 className="text-sm font-semibold tracking-tight text-slate-200">
-                Today vs Nearest Neighbour (HE 1–24)
+                Today vs Selected Nearest Neighbour (HE 1–24)
               </h2>
               <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-400">
                 <span className="flex items-center gap-1">
@@ -141,9 +254,13 @@ export default async function NearestNeighbourPage() {
               <span className="font-medium text-slate-200">
                 best-known AIL
               </span>{" "}
-              against the selected historical analogue day from AESO&apos;s
-              hourly pool price &amp; AIL history. The nearest neighbour is
-              chosen to minimise differences in both load and price.
+              against the{" "}
+              <span className="font-medium text-slate-200">
+                selected historical analogue day
+              </span>{" "}
+              from AESO&apos;s hourly pool price &amp; AIL history. The
+              candidate nearest neighbours are ranked by similarity of both load
+              and price profiles.
             </p>
 
             <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/40">
@@ -160,7 +277,7 @@ export default async function NearestNeighbourPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {result.rows.map((row) => {
+                  {selectedCandidate.rows.map((row) => {
                     const dPrice = row.deltaPrice ?? null;
                     const dLoad = row.deltaLoad ?? null;
 
@@ -253,11 +370,11 @@ export default async function NearestNeighbourPage() {
               Data sources (no synthetic values): today&apos;s curve comes from
               the AESO <span className="font-medium">Actual / Forecast</span>{" "}
               (WMRQH) report, using actuals where published and forecasts
-              elsewhere. The nearest-neighbour curve is selected from historical
-              hourly pool price and AIL (e.g. the AESO &quot;Hourly Metered
-              Volumes and Pool Price and AIL&quot; data you trimmed into your
-              local history file), based on similarity of both load and price
-              profiles.
+              elsewhere. Each candidate nearest-neighbour curve is selected from
+              historical hourly pool price and AIL (e.g. the AESO
+              &quot;Hourly Metered Volumes and Pool Price and AIL&quot; data
+              you trimmed into your local history file), based on similarity of
+              both load and price profiles.
             </p>
           </section>
         )}
