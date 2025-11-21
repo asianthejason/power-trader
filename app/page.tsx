@@ -93,7 +93,8 @@ type IntertieSnapshot = {
   path: IntertiePath;
   counterparty: string;
   // Net actual flow from AESO CSD, MW.
-  // Positive = net exports from Alberta, negative = net imports into Alberta.
+  // Positive/negative sign is whatever AESO publishes; we use it
+  // directly for RT tielines.
   actualFlowMw: number | null;
 };
 
@@ -296,12 +297,17 @@ function parseShortTermCsvToHeMap(
 
   const headers = lines[0].split(",").map((h) => h.trim().toLowerCase());
 
-  const timeIdx = headers.findIndex((h) => h.startsWith("time"));
+  // AESO files use "Forecast Transaction Date" as the first column;
+  // we treat anything with "date" or "time" in the name as the
+  // timestamp column.
+  const timeIdx = headers.findIndex(
+    (h) => h.includes("time") || h.includes("date")
+  );
   const actualIdx = headers.findIndex((h) => h.startsWith("actual"));
 
   if (timeIdx === -1 || actualIdx === -1) {
     console.error(
-      "Short-term renewables CSV is missing Time/Actual columns."
+      "Short-term renewables CSV is missing Date/Time or Actual columns."
     );
     return map;
   }
@@ -321,7 +327,10 @@ function parseShortTermCsvToHeMap(
     const datePart = rawTime.slice(0, 10).replace(/\//g, "-");
     if (datePart !== dateIso) continue;
 
-    const timePart = rawTime.slice(11); // "HH:MM" or "HH:MM:SS"
+    // Everything after the first space is the time portion: "HH:MM" or "HH:MM:SS"
+    const spaceIdx = rawTime.indexOf(" ");
+    if (spaceIdx === -1) continue;
+    const timePart = rawTime.slice(spaceIdx + 1);
     const hourStr = timePart.slice(0, 2);
     const hour = Number(hourStr);
     if (!Number.isFinite(hour)) continue;
