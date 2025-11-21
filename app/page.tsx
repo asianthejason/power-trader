@@ -13,6 +13,7 @@ import {
 export const revalidate = 60; // regenerate at most once per minute
 
 type PriceSource = "actual" | "forecast" | null;
+type RenewableSource = "actual" | "forecast" | null;
 
 /* ---------- small helpers ---------- */
 
@@ -324,58 +325,63 @@ const AESO_SOLAR_12H_URL =
 
 /**
  * Parse a 12-hour short-term renewables CSV (wind or solar) and
- * return a map HE → average actual MW for the given date.
- *
- * We treat each row's timestamp as an instantaneous MW reading and
- * take the simple arithmetic mean of `Actual` within the hour.
- *
- * In the AESO CSV the first column is "Forecast Transaction Date",
- * e.g. "2025-11-20 10:40". We map hour 10 → HE 11, etc.
+ * return:
+ *   - HE → average MW using Actual where available, otherwise Most Likely
+ *   - HE → source flag: "actual" if all samples were Actual,
+ *       "forecast" if any sample had to use Most Likely.
  */
 function parseShortTermCsvToHeMap(
   csvText: string,
   dateIso: string
-): Map<number, number | null> {
+): {
+  valueByHe: Map<number, number | null>;
+  sourceByHe: Map<number, RenewableSource>;
+} {
   const lines = csvText
     .split(/\r?\n/)
     .map((l) => l.trim())
     .filter((l) => l.length > 0);
 
-  const map = new Map<number, number | null>();
-  if (lines.length <= 1) return map;
+  const valueByHe = new Map<number, number | null>();
+  const sourceByHe = new Map<number, RenewableSource>();
 
-  const headers = splitCsvLine(lines[0])
-    .map((h) => h.trim().toLowerCase());
+  if (lines.length <= 1) return { valueByHe, sourceByHe };
 
-  // AESO header is "Forecast Transaction Date"
-  const timeIdx = headers.findIndex(
-    (h) => /date|time/i.test(h)
-  );
-  const actualIdx = headers.findIndex((h) => /actual/i.test(h) && !/pct/i.test(h));
+  const headerCells = splitCsvLine(lines[0]).map((h) => h.trim());
 
-  if (timeIdx === -1 || actualIdx === -1) {
-    console.error(
-      "Short-term renewables CSV is missing Forecast Transaction Date / Actual columns."
-    );
-    return map;
+  const dateIdx = headerCells.findIndex((h) => /date|time/i.test(h));
+
+  const findMwIdx = (pattern: RegExp) =>
+    headerCells.findIndex((h) => pattern.test(h) && !/pct/i.test(h));
+
+  let mostIdx = findMwIdx(/most\s*likely/i);
+  let actualIdx = findMwIdx(/actual/i);
+
+  // Fallbacks if headers change a bit
+  if (dateIdx < 0) {
+    console.error("Short-term CSV missing Forecast Transaction Date column.");
   }
 
-  const buckets: Record<number, number[]> = {};
+  if (mostIdx < 0 && actualIdx < 0) {
+    console.error("Short-term CSV missing both Actual and Most Likely columns.");
+    return { valueByHe, sourceByHe };
+  }
+
+  type Sample = { value: number; isActual: boolean };
+  const buckets: Record<number, Sample[]> = {};
 
   for (let i = 1; i < lines.length; i++) {
     const cols = splitCsvLine(lines[i]).map((c) => c.trim());
-    if (cols.length <= Math.max(timeIdx, actualIdx)) continue;
+    if (cols.length === 0) continue;
 
-    const rawTime = cols[timeIdx];
-    const rawActual = cols[actualIdx];
-
-    if (!rawTime) continue;
+    const timeRaw = dateIdx >= 0 ? cols[dateIdx] : cols[0];
+    if (!timeRaw) continue;
 
     // First 10 characters are the date in the CSV
-    const datePart = rawTime.slice(0, 10).replace(/\//g, "-");
+    const datePart = timeRaw.slice(0, 10).replace(/\//g, "-");
     if (datePart !== dateIso) continue;
 
-    const timePart = rawTime.slice(11); // "HH:MM" or "HH:MM:SS"
+    const timePart = timeRaw.slice(11); // "HH:MM" or "HH:MM:SS"
     const hourStr = timePart.slice(0, 2);
     const hour = Number(hourStr);
     if (!Number.isFinite(hour)) continue;
@@ -383,32 +389,66 @@ function parseShortTermCsvToHeMap(
     const he = hour + 1; // hour 0..23 → HE 1..24
     if (he < 1 || he > 24) continue;
 
-    const val = parseMw(rawActual);
-    if (val == null) continue;
+    const actualVal =
+      actualIdx >= 0 ? parseMw(cols[actualIdx]) : null;
+    const mostVal =
+      mostIdx >= 0 ? parseMw(cols[mostIdx]) : null;
+
+    let useVal: number | null = null;
+    let isActual = false;
+
+    if (actualVal != null) {
+      useVal = actualVal;
+      isActual = true;
+    } else if (mostVal != null) {
+      useVal = mostVal;
+      isActual = false;
+    } else {
+      continue;
+    }
 
     if (!buckets[he]) buckets[he] = [];
-    buckets[he].push(val);
+    buckets[he].push({ value: useVal, isActual });
   }
 
-  for (const [heStr, arr] of Object.entries(buckets)) {
+  for (const [heStr, samples] of Object.entries(buckets)) {
     const he = Number(heStr);
-    if (!arr.length) continue;
-    const avg = arr.reduce((sum, v) => sum + v, 0) / arr.length;
-    map.set(he, avg);
+    if (!samples.length) continue;
+
+    let sum = 0;
+    let hasActual = false;
+    let hasForecast = false;
+
+    for (const s of samples) {
+      sum += s.value;
+      if (s.isActual) hasActual = true;
+      else hasForecast = true;
+    }
+
+    const avg = sum / samples.length;
+    valueByHe.set(he, avg);
+
+    let src: RenewableSource = null;
+    if (hasForecast) src = "forecast"; // any Most Likely ⇒ blue
+    else if (hasActual) src = "actual";
+
+    sourceByHe.set(he, src);
   }
 
-  return map;
+  return { valueByHe, sourceByHe };
 }
 
 /**
  * Fetch 12-hour short-term wind & solar CSVs and convert them to
- * HE-level average actual MW for the given ISO date (YYYY-MM-DD).
+ * HE-level average MW + source flags for the given ISO date (YYYY-MM-DD).
  *
  * Uses the same HTTP endpoints and headers as /renewables.
  */
 async function fetchShortTermHeMaps(dateIso: string): Promise<{
   windByHe: Map<number, number | null>;
   solarByHe: Map<number, number | null>;
+  windSourceByHe: Map<number, RenewableSource>;
+  solarSourceByHe: Map<number, RenewableSource>;
 }> {
   try {
     const [windRes, solarRes] = await Promise.all([
@@ -448,22 +488,35 @@ async function fetchShortTermHeMaps(dateIso: string): Promise<{
       solarRes.ok ? solarRes.text() : Promise.resolve(""),
     ]);
 
-    const windByHe =
+    const windParsed =
       windCsv.trim().length > 0
         ? parseShortTermCsvToHeMap(windCsv, dateIso)
-        : new Map<number, number | null>();
+        : {
+            valueByHe: new Map<number, number | null>(),
+            sourceByHe: new Map<number, RenewableSource>(),
+          };
 
-    const solarByHe =
+    const solarParsed =
       solarCsv.trim().length > 0
         ? parseShortTermCsvToHeMap(solarCsv, dateIso)
-        : new Map<number, number | null>();
+        : {
+            valueByHe: new Map<number, number | null>(),
+            sourceByHe: new Map<number, RenewableSource>(),
+          };
 
-    return { windByHe, solarByHe };
+    return {
+      windByHe: windParsed.valueByHe,
+      solarByHe: solarParsed.valueByHe,
+      windSourceByHe: windParsed.sourceByHe,
+      solarSourceByHe: solarParsed.sourceByHe,
+    };
   } catch (err) {
     console.error("Error fetching short-term renewables:", err);
     return {
       windByHe: new Map<number, number | null>(),
       solarByHe: new Map<number, number | null>(),
+      windSourceByHe: new Map<number, RenewableSource>(),
+      solarSourceByHe: new Map<number, RenewableSource>(),
     };
   }
 }
@@ -607,15 +660,19 @@ export default async function DashboardPage() {
 
   const rows: JoinedRow[] = buildJoinedRows(todayStates, nnStates);
 
-  // Fetch HE-average actual wind & solar for today's date
+  // Fetch HE-average wind & solar for today's date (Actual, else Most Likely)
   const todayDateIso = todayStates[0]?.date;
   let windByHe = new Map<number, number | null>();
   let solarByHe = new Map<number, number | null>();
+  let windSourceByHe = new Map<number, RenewableSource>();
+  let solarSourceByHe = new Map<number, RenewableSource>();
 
   if (todayDateIso) {
     const shortTerm = await fetchShortTermHeMaps(todayDateIso);
     windByHe = shortTerm.windByHe;
     solarByHe = shortTerm.solarByHe;
+    windSourceByHe = shortTerm.windSourceByHe;
+    solarSourceByHe = shortTerm.solarSourceByHe;
   }
 
   // If we have a proper nearest-neighbour result, overwrite NN price/load
@@ -639,7 +696,7 @@ export default async function DashboardPage() {
     }
   }
 
-  // Build “actual vs forecast” source maps for today’s side
+  // Build “actual vs forecast” source maps for today’s pool price & load
   const {
     priceSourceByHe,
     loadSourceByHe,
@@ -721,7 +778,9 @@ export default async function DashboardPage() {
             Supply cushion and nearest-neighbour view built from AESO
             Actual/Forecast WMRQH, historical NN curves, live CSD
             interchange, and short-term renewables data. No synthetic
-            model curves are used on this page.
+            model curves are used on this page. Green values use AESO
+            actuals; blue values use Most Likely forecast where actuals
+            are not yet available.
           </p>
         </header>
 
@@ -876,11 +935,12 @@ export default async function DashboardPage() {
                 {rows.map((row) => {
                   const isCurrent = now && row.he === now.he;
 
-                  const priceSource =
-                    priceSourceByHe.get(row.he) ?? null;
+                  const priceSource = priceSourceByHe.get(row.he) ?? null;
                   const loadSource = loadSourceByHe.get(row.he) ?? null;
+                  const windSource = windSourceByHe.get(row.he) ?? null;
+                  const solarSource = solarSourceByHe.get(row.he) ?? null;
 
-                  // Colour: actual = green, forecast = blue
+                  // Colour: actual = green, forecast/Most Likely = blue
                   const todayPriceClass =
                     priceSource === "actual"
                       ? "text-emerald-400"
@@ -892,6 +952,20 @@ export default async function DashboardPage() {
                     loadSource === "actual"
                       ? "text-emerald-400"
                       : loadSource === "forecast"
+                      ? "text-sky-400"
+                      : "text-slate-300";
+
+                  const rtWindClass =
+                    windSource === "actual"
+                      ? "text-emerald-400"
+                      : windSource === "forecast"
+                      ? "text-sky-400"
+                      : "text-slate-300";
+
+                  const rtSolarClass =
+                    solarSource === "actual"
+                      ? "text-emerald-400"
+                      : solarSource === "forecast"
                       ? "text-sky-400"
                       : "text-slate-300";
 
@@ -1007,7 +1081,7 @@ export default async function DashboardPage() {
                       <td className="px-3 py-2 text-slate-300">
                         {formatNumber(row.nnWind, 0)}
                       </td>
-                      <td className="px-3 py-2 text-slate-300">
+                      <td className={"px-3 py-2 " + rtWindClass}>
                         {formatNumber(row.rtWind, 0)}
                       </td>
                       <td className={"px-3 py-2 " + windDeltaClass}>
@@ -1021,7 +1095,7 @@ export default async function DashboardPage() {
                       <td className="px-3 py-2 text-slate-300">
                         {formatNumber(row.nnSolar, 0)}
                       </td>
-                      <td className="px-3 py-2 text-slate-300">
+                      <td className={"px-3 py-2 " + rtSolarClass}>
                         {formatNumber(row.rtSolar, 0)}
                       </td>
                       <td className={"px-3 py-2 " + solarDeltaClass}>
