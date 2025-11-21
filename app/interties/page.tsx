@@ -49,8 +49,6 @@ type IntertieSnapshotResult = {
  *   - the INTERCHANGE table (BC / Montana / Saskatchewan)
  *   - the SUMMARY row "Net Actual Interchange"
  *
- * No synthetic numbers – if parsing fails we surface nulls.
- *
  * Source:
  *   http://ets.aeso.ca/ets_web/ip/Market/Reports/CSDReportServlet
  */
@@ -108,14 +106,8 @@ async function fetchAesoInterchangeSnapshot(): Promise<IntertieSnapshotResult> {
  * Given the raw HTML from CSDReportServlet, find the numeric MW value
  * that appears in a table row after the given label.
  *
- * The HTML for those rows typically looks like:
- *
  *   <tr><td>British Columbia</td><td>-435</td></tr>
  *   <tr><td>Net Actual Interchange</td><td>-489</td></tr>
- *
- * So we:
- *   1. Find the first occurrence of the label string.
- *   2. Look ahead for "</td><td>NUMBER</td>".
  */
 function extractFlowForLabel(html: string, label: string): number | null {
   const idx = html.indexOf(label);
@@ -170,10 +162,7 @@ type AesoInterchangeJson = {
  * Pull today’s ATC capability curves from AESO’s
  *   https://itc.aeso.ca/itc/public/api/v2/interchange
  *
- * We request dataType=ATC and then collapse the JSON into one row per HE
- * with BC / MATL / SK / System / BC+MATL capability.
- *
- * All numbers are straight from AESO; no synthetic modelling.
+ * We request dataType=ATC and then collapse the JSON into one row per HE.
  */
 async function fetchTodayAtcRows(): Promise<{
   date: string;
@@ -283,6 +272,15 @@ async function fetchTodayAtcRows(): Promise<{
   }
 }
 
+/* ---------- small display helpers ---------- */
+
+function flowDirection(v: number | null): string {
+  if (v == null) return "—";
+  if (v > 0) return "Export from Alberta";
+  if (v < 0) return "Import into Alberta";
+  return "Balanced";
+}
+
 /* ---------- page ---------- */
 
 export default async function IntertiesPage() {
@@ -293,17 +291,6 @@ export default async function IntertiesPage() {
     fetchAesoInterchangeSnapshot(),
     fetchTodayAtcRows(),
   ]);
-
-  const hasPathData = pathRows.some((r) => r.actualFlowMw != null);
-  const sumOfPathsMw = pathRows.reduce((acc, r) => {
-    if (r.actualFlowMw == null) return acc;
-    return acc + r.actualFlowMw;
-  }, 0);
-
-  const deltaSystemVsPaths =
-    systemNetInterchangeMw != null && hasPathData
-      ? systemNetInterchangeMw - sumOfPathsMw
-      : null;
 
   const hasAnyAtc =
     atcRows.length > 0 &&
@@ -320,6 +307,10 @@ export default async function IntertiesPage() {
         r.bcMatlImportCap != null ||
         r.bcMatlExportCap != null
     );
+
+  const bcRow = pathRows.find((r) => r.path === "AB-BC") || null;
+  const matlRow = pathRows.find((r) => r.path === "AB-MATL") || null;
+  const skRow = pathRows.find((r) => r.path === "AB-SK") || null;
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100">
@@ -364,18 +355,17 @@ export default async function IntertiesPage() {
 
         <NavTabs />
 
-        {/* System summary cards */}
-        <section className="mt-4 mb-4 grid gap-3 sm:grid-cols-3">
+        {/* Summary cards: Net + BC + MATL + SK */}
+        <section className="mt-4 mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          {/* System net card */}
           <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-3">
             <div className="text-[11px] uppercase tracking-wide text-slate-400">
               System Net Actual Interchange
             </div>
-            <div className="mt-1 flex items-baseline gap-2">
-              <div className="text-lg font-semibold">
-                {systemNetInterchangeMw != null
-                  ? `${formatNumber(systemNetInterchangeMw, 0)} MW`
-                  : "—"}
-              </div>
+            <div className="mt-1 text-lg font-semibold">
+              {systemNetInterchangeMw != null
+                ? `${formatNumber(systemNetInterchangeMw, 0)} MW`
+                : "—"}
             </div>
             <p className="mt-1 text-[11px] text-slate-500">
               From the CSD summary row &quot;Net Actual Interchange&quot;.
@@ -384,139 +374,57 @@ export default async function IntertiesPage() {
             </p>
           </div>
 
+          {/* AB-BC card */}
           <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-3">
             <div className="text-[11px] uppercase tracking-wide text-slate-400">
-              Sum of path flows (AB-BC, AB-MATL, AB-SK)
+              AB-BC Path
             </div>
             <div className="mt-1 text-lg font-semibold">
-              {hasPathData ? `${formatNumber(sumOfPathsMw, 0)} MW` : "—"}
-            </div>
-            <p className="mt-1 text-[11px] text-slate-500">
-              Simple sum of the three intertie paths shown below. Should be
-              close to the system net interchange, with differences due to
-              losses, metering, and any additional paths/model details.
-            </p>
-          </div>
-
-          <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-3">
-            <div className="text-[11px] uppercase tracking-wide text-slate-400">
-              Difference (system − path sum)
-            </div>
-            <div className="mt-1 text-lg font-semibold">
-              {deltaSystemVsPaths != null
-                ? `${formatNumber(deltaSystemVsPaths, 0)} MW`
+              {bcRow?.actualFlowMw != null
+                ? `${formatNumber(bcRow.actualFlowMw, 0)} MW`
                 : "—"}
             </div>
             <p className="mt-1 text-[11px] text-slate-500">
-              Quick sanity check. Large persistent deltas are a cue to look more
-              closely at AESO&apos;s reports and your parsing.
+              {flowDirection(bcRow?.actualFlowMw)} with British Columbia.
+              Positive = exports from Alberta; negative = imports into Alberta.
+            </p>
+          </div>
+
+          {/* AB-MATL card */}
+          <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-3">
+            <div className="text-[11px] uppercase tracking-wide text-slate-400">
+              AB-MATL Path
+            </div>
+            <div className="mt-1 text-lg font-semibold">
+              {matlRow?.actualFlowMw != null
+                ? `${formatNumber(matlRow.actualFlowMw, 0)} MW`
+                : "—"}
+            </div>
+            <p className="mt-1 text-[11px] text-slate-500">
+              {flowDirection(matlRow?.actualFlowMw)} with Montana (MATL).
+              Positive = exports from Alberta; negative = imports into Alberta.
+            </p>
+          </div>
+
+          {/* AB-SK card */}
+          <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-3">
+            <div className="text-[11px] uppercase tracking-wide text-slate-400">
+              AB-SK Path
+            </div>
+            <div className="mt-1 text-lg font-semibold">
+              {skRow?.actualFlowMw != null
+                ? `${formatNumber(skRow.actualFlowMw, 0)} MW`
+                : "—"}
+            </div>
+            <p className="mt-1 text-[11px] text-slate-500">
+              {flowDirection(skRow?.actualFlowMw)} with Saskatchewan.
+              Positive = exports from Alberta; negative = imports into Alberta.
             </p>
           </div>
         </section>
 
-        {/* Path net flow table */}
-        <section className="rounded-2xl border border-slate-800 bg-slate-900/80 p-4">
-          <div className="mb-3 flex items-baseline justify-between gap-2">
-            <div>
-              <h2 className="text-sm font-semibold tracking-tight">
-                Current Intertie Flows by Path
-              </h2>
-              <p className="text-[11px] text-slate-400">
-                Snapshot of net interchange on each path from the INTERCHANGE
-                table in AESO&apos;s Current Supply Demand report. To build a
-                full HE-by-HE history with Import/Export ATC and scheduled
-                volumes, you&apos;ll wire this page to AESO&apos;s Interchange
-                capability APIs and your own persisted time series.
-              </p>
-            </div>
-          </div>
-
-          <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/40">
-            <table className="min-w-full text-left text-xs">
-              <thead className="bg-slate-900/80 text-[11px] uppercase tracking-wide text-slate-400">
-                <tr>
-                  <th className="px-3 py-2">Path</th>
-                  <th className="px-3 py-2">Counterparty</th>
-                  <th className="px-3 py-2">Net flow (MW)</th>
-                  <th className="px-3 py-2">Direction</th>
-                  <th className="px-3 py-2">Notes</th>
-                </tr>
-              </thead>
-              <tbody>
-                {pathRows.map((row) => {
-                  const v = row.actualFlowMw;
-                  let direction: string = "—";
-                  if (v != null) {
-                    if (v > 0) direction = "Export from Alberta";
-                    else if (v < 0) direction = "Import into Alberta";
-                    else direction = "Balanced";
-                  }
-
-                  return (
-                    <tr
-                      key={row.path}
-                      className="border-t border-slate-800/60 hover:bg-slate-900/40"
-                    >
-                      <td className="px-3 py-2 text-[11px] font-medium text-slate-200">
-                        {row.path}
-                      </td>
-                      <td className="px-3 py-2 text-[11px] text-slate-300">
-                        {row.counterparty}
-                      </td>
-                      <td className="px-3 py-2 text-[11px] text-slate-200">
-                        {v != null ? formatNumber(v, 0) : "—"}
-                      </td>
-                      <td className="px-3 py-2 text-[11px] text-slate-300">
-                        {direction}
-                      </td>
-                      <td className="px-3 py-2 text-[11px] text-slate-400">
-                        Positive = exports from Alberta; negative = imports into
-                        Alberta. Values should line up with the corresponding
-                        rows in the CSD INTERCHANGE table.
-                      </td>
-                    </tr>
-                  );
-                })}
-
-                {!pathRows.length && (
-                  <tr>
-                    <td
-                      className="px-3 py-4 text-center text-[11px] text-slate-500"
-                      colSpan={5}
-                    >
-                      Could not fetch intertie data from AESO right now. This
-                      can happen when the CSD page is temporarily unavailable.
-                      No synthetic fallback is used – refresh later to try
-                      again.
-                    </td>
-                  </tr>
-                )}
-
-                {pathRows.length > 0 && !hasPathData && (
-                  <tr>
-                    <td
-                      className="px-3 py-3 text-center text-[11px] text-amber-400/90"
-                      colSpan={5}
-                    >
-                      The CSD page responded, but the INTERCHANGE rows for
-                      British Columbia, Montana, and Saskatchewan did not parse
-                      cleanly. Check AESO&apos;s HTML – this scraper assumes
-                      simple table rows with the label followed by a numeric MW
-                      value.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-
-          <p className="mt-2 text-[11px] text-slate-500">
-            Data source: AESO Current Supply Demand Report (CSD).
-          </p>
-        </section>
-
         {/* Hour-by-hour ATC / capability table */}
-        <section className="mt-6 rounded-2xl border border-slate-800 bg-slate-900/80 p-4">
+        <section className="mt-2 rounded-2xl border border-slate-800 bg-slate-900/80 p-4">
           <div className="mb-3 flex items-baseline justify-between gap-2">
             <div>
               <h2 className="text-sm font-semibold tracking-tight">
