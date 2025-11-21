@@ -270,7 +270,57 @@ async function loadNnTielinesForDate(
   return map;
 }
 
+/* ---------- CSV helpers copied from renewables ---------- */
+
+/** Very small CSV splitter that respects quoted fields. */
+function splitCsvLine(line: string): string[] {
+  const result: string[] = [];
+  let current = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+
+    if (ch === '"') {
+      // Toggle quote state; double quotes inside a quoted field are collapsed.
+      if (i + 1 < line.length && line[i + 1] === '"') {
+        current += '"';
+        i++; // skip escaped quote
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+
+    if (ch === "," && !inQuotes) {
+      result.push(current);
+      current = "";
+      continue;
+    }
+
+    current += ch;
+  }
+
+  result.push(current);
+  return result;
+}
+
+function parseMw(raw: string | undefined): number | null {
+  if (!raw) return null;
+  const cleaned = raw.replace(/["\s,]/g, "");
+  if (!cleaned) return null;
+  const val = Number(cleaned);
+  return Number.isFinite(val) ? val : null;
+}
+
 /* ---------- short-term renewables → HE averages ---------- */
+
+// Same AESO URLs as /renewables page.
+const AESO_WIND_12H_URL =
+  "http://ets.aeso.ca/Market/Reports/Manual/Operations/prodweb_reports/wind_solar_forecast/wind_rpt_shortterm.csv";
+
+const AESO_SOLAR_12H_URL =
+  "http://ets.aeso.ca/Market/Reports/Manual/Operations/prodweb_reports/wind_solar_forecast/solar_rpt_shortterm.csv";
 
 /**
  * Parse a 12-hour short-term renewables CSV (wind or solar) and
@@ -280,8 +330,7 @@ async function loadNnTielinesForDate(
  * take the simple arithmetic mean of `Actual` within the hour.
  *
  * In the AESO CSV the first column is "Forecast Transaction Date",
- * e.g. "2025-11-20 10:40".
- * We map hour 10 → HE 11, etc.
+ * e.g. "2025-11-20 10:40". We map hour 10 → HE 11, etc.
  */
 function parseShortTermCsvToHeMap(
   csvText: string,
@@ -295,13 +344,14 @@ function parseShortTermCsvToHeMap(
   const map = new Map<number, number | null>();
   if (lines.length <= 1) return map;
 
-  const headers = lines[0].split(",").map((h) => h.trim().toLowerCase());
+  const headers = splitCsvLine(lines[0])
+    .map((h) => h.trim().toLowerCase());
 
   // AESO header is "Forecast Transaction Date"
   const timeIdx = headers.findIndex(
-    (h) => h.includes("time") || h.includes("date")
+    (h) => /date|time/i.test(h)
   );
-  const actualIdx = headers.findIndex((h) => h.startsWith("actual"));
+  const actualIdx = headers.findIndex((h) => /actual/i.test(h) && !/pct/i.test(h));
 
   if (timeIdx === -1 || actualIdx === -1) {
     console.error(
@@ -313,11 +363,11 @@ function parseShortTermCsvToHeMap(
   const buckets: Record<number, number[]> = {};
 
   for (let i = 1; i < lines.length; i++) {
-    const cols = lines[i].split(",");
+    const cols = splitCsvLine(lines[i]).map((c) => c.trim());
     if (cols.length <= Math.max(timeIdx, actualIdx)) continue;
 
-    const rawTime = cols[timeIdx]?.trim();
-    const rawActual = cols[actualIdx]?.trim();
+    const rawTime = cols[timeIdx];
+    const rawActual = cols[actualIdx];
 
     if (!rawTime) continue;
 
@@ -333,12 +383,8 @@ function parseShortTermCsvToHeMap(
     const he = hour + 1; // hour 0..23 → HE 1..24
     if (he < 1 || he > 24) continue;
 
-    if (!rawActual || rawActual === "-" || rawActual === "--") continue;
-
-    // Strip thousand separators ("1,031" → "1031")
-    const cleaned = rawActual.replace(/,/g, "");
-    const val = Number(cleaned);
-    if (!Number.isFinite(val)) continue;
+    const val = parseMw(rawActual);
+    if (val == null) continue;
 
     if (!buckets[he]) buckets[he] = [];
     buckets[he].push(val);
@@ -358,23 +404,44 @@ function parseShortTermCsvToHeMap(
  * Fetch 12-hour short-term wind & solar CSVs and convert them to
  * HE-level average actual MW for the given ISO date (YYYY-MM-DD).
  *
- * IMPORTANT: AESO short-term reports are only served over HTTP,
- * not HTTPS – use http:// or fetch will fail.
+ * Uses the same HTTP endpoints and headers as /renewables.
  */
 async function fetchShortTermHeMaps(dateIso: string): Promise<{
   windByHe: Map<number, number | null>;
   solarByHe: Map<number, number | null>;
 }> {
-  const WIND_URL =
-    "http://reports.aeso.ca/short-term/wind/wind_rpt_shortterm.csv";
-  const SOLAR_URL =
-    "http://reports.aeso.ca/short-term/solar/solar_rpt_shortterm.csv";
-
   try {
     const [windRes, solarRes] = await Promise.all([
-      fetch(WIND_URL),
-      fetch(SOLAR_URL),
+      fetch(AESO_WIND_12H_URL, {
+        cache: "no-store",
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (compatible; AlbertaPowerTraderBot/1.0; +https://power-trader.vercel.app)",
+        },
+      }),
+      fetch(AESO_SOLAR_12H_URL, {
+        cache: "no-store",
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (compatible; AlbertaPowerTraderBot/1.0; +https://power-trader.vercel.app)",
+        },
+      }),
     ]);
+
+    if (!windRes.ok) {
+      console.error(
+        "Failed to fetch AESO wind short-term report:",
+        windRes.status,
+        windRes.statusText
+      );
+    }
+    if (!solarRes.ok) {
+      console.error(
+        "Failed to fetch AESO solar short-term report:",
+        solarRes.status,
+        solarRes.statusText
+      );
+    }
 
     const [windCsv, solarCsv] = await Promise.all([
       windRes.ok ? windRes.text() : Promise.resolve(""),
