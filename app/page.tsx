@@ -297,7 +297,7 @@ function parseShortTermCsvToHeMap(
 
   const headers = lines[0].split(",").map((h) => h.trim().toLowerCase());
 
-  // FIX: AESO header is "Forecast Transaction Date", not "Time"
+  // AESO header is "Forecast Transaction Date"
   const timeIdx = headers.findIndex(
     (h) => h.includes("time") || h.includes("date")
   );
@@ -357,15 +357,18 @@ function parseShortTermCsvToHeMap(
 /**
  * Fetch 12-hour short-term wind & solar CSVs and convert them to
  * HE-level average actual MW for the given ISO date (YYYY-MM-DD).
+ *
+ * IMPORTANT: AESO short-term reports are only served over HTTP,
+ * not HTTPS – use http:// or fetch will fail.
  */
 async function fetchShortTermHeMaps(dateIso: string): Promise<{
   windByHe: Map<number, number | null>;
   solarByHe: Map<number, number | null>;
 }> {
   const WIND_URL =
-    "https://reports.aeso.ca/short-term/wind/wind_rpt_shortterm.csv";
+    "http://reports.aeso.ca/short-term/wind/wind_rpt_shortterm.csv";
   const SOLAR_URL =
-    "https://reports.aeso.ca/short-term/solar/solar_rpt_shortterm.csv";
+    "http://reports.aeso.ca/short-term/solar/solar_rpt_shortterm.csv";
 
   try {
     const [windRes, solarRes] = await Promise.all([
