@@ -562,11 +562,17 @@ function buildJoinedRows(
     const dLoad =
       nnLoad != null && rtLoad != null ? rtLoad - nnLoad : null;
 
-    // Cushion delta vs NN (using whatever cushionMw was computed)
+    // Cushion delta vs NN (using whatever cushionMw was computed).
+    // If both cushions are 0 everywhere, we'll detect that later
+    // and fall back to the component-based cumulative supply Δ.
     const todayCushion = today.cushionMw ?? null;
     const nnCushion = nn?.cushionMw ?? null;
     let nnCushionDelta: number | null = null;
-    if (todayCushion != null && nnCushion != null) {
+    if (
+      todayCushion != null &&
+      nnCushion != null &&
+      !(todayCushion === 0 && nnCushion === 0)
+    ) {
       nnCushionDelta = todayCushion - nnCushion;
     }
 
@@ -767,19 +773,51 @@ export default async function DashboardPage() {
 
   // Now compute hourly & cumulative supply deltas from components:
   //   Hourly Δ Supply = ΔWind + ΔSolar − ΔLoad − ΔTielines
-  let cumulativeSupplyDelta = 0;
+  //
+  // We only start accumulating once we have at least one component
+  // (ΔLoad, ΔTielines, ΔWind, or ΔSolar) for that HE.
+  let cumulativeSupplyDelta: number | null = null;
+
   for (const row of rows) {
+    const hasAnyComponent =
+      row.dLoad != null ||
+      row.dTielines != null ||
+      row.dWind != null ||
+      row.dSolar != null;
+
+    if (!hasAnyComponent) {
+      row.hourlySupplyDelta = null;
+      continue;
+    }
+
     const loadDelta = row.dLoad ?? 0;
     const tielineDelta = row.dTielines ?? 0;
     const windDelta = row.dWind ?? 0;
     const solarDelta = row.dSolar ?? 0;
 
-    const hourly =
-      windDelta + solarDelta - loadDelta - tielineDelta;
+    const hourly = windDelta + solarDelta - loadDelta - tielineDelta;
 
     row.hourlySupplyDelta = hourly;
-    cumulativeSupplyDelta += hourly;
+
+    cumulativeSupplyDelta = (cumulativeSupplyDelta ?? 0) + hourly;
     row.cumulativeSupplyDelta = cumulativeSupplyDelta;
+  }
+
+  // If we *don't* have meaningful cushionMw-based deltas (everything
+  // 0 or null), fall back and use the component-based cumulative
+  // supply Δ as the NN Supply Cushion Δ column.
+  const hasNonTrivialCushion = rows.some(
+    (r) => r.nnCushionDelta != null && Math.abs(r.nnCushionDelta) > 0.5
+  );
+
+  if (!hasNonTrivialCushion) {
+    for (const row of rows) {
+      if (row.cumulativeSupplyDelta != null) {
+        row.nnCushionDelta = row.cumulativeSupplyDelta;
+      } else {
+        row.nnCushionDelta = null;
+      }
+    }
   }
 
   const comparisonDate =
@@ -1053,10 +1091,11 @@ export default async function DashboardPage() {
                           : "—"}
                       </td>
 
-                      {/* NN supply cushion delta (today cushion − NN cushion) */}
+                      {/* NN supply cushion delta */}
                       <td className="px-3 py-2 text-slate-300">
                         {row.nnCushionDelta != null
-                          ? formatNumber(row.nnCushionDelta, 0)
+                          ? (row.nnCushionDelta > 0 ? "+" : "") +
+                            formatNumber(row.nnCushionDelta, 0)
                           : "—"}
                       </td>
 
