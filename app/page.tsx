@@ -58,21 +58,31 @@ type JoinedRow = {
   comparisonDate: string | null;
   today: HourlyState;
   nn: HourlyState | null;
+
   todayPrice: number | null;
   nnPrice: number | null;
   dPrice: number | null;
+
   nnLoad: number | null;
   rtLoad: number | null;
   dLoad: number | null;
+
   nnTielines: number | null;
   rtTielines: number | null;
   dTielines: number | null;
+
   nnWind: number | null;
   rtWind: number | null;
   dWind: number | null;
+
   nnSolar: number | null;
   rtSolar: number | null;
   dSolar: number | null;
+
+  // Cushion-based delta vs NN (today cushion − NN cushion)
+  nnCushionDelta: number | null;
+
+  // Component-based supply deltas (ΔWind + ΔSolar − ΔLoad − ΔTielines)
   hourlySupplyDelta: number | null;
   cumulativeSupplyDelta: number | null;
 };
@@ -357,11 +367,6 @@ function parseShortTermCsvToHeMap(
   let mostIdx = findMwIdx(/most\s*likely/i);
   let actualIdx = findMwIdx(/actual/i);
 
-  // Fallbacks if headers change a bit
-  if (dateIdx < 0) {
-    console.error("Short-term CSV missing Forecast Transaction Date column.");
-  }
-
   if (mostIdx < 0 && actualIdx < 0) {
     console.error("Short-term CSV missing both Actual and Most Likely columns.");
     return { valueByHe, sourceByHe };
@@ -389,10 +394,8 @@ function parseShortTermCsvToHeMap(
     const he = hour + 1; // hour 0..23 → HE 1..24
     if (he < 1 || he > 24) continue;
 
-    const actualVal =
-      actualIdx >= 0 ? parseMw(cols[actualIdx]) : null;
-    const mostVal =
-      mostIdx >= 0 ? parseMw(cols[mostIdx]) : null;
+    const actualVal = actualIdx >= 0 ? parseMw(cols[actualIdx]) : null;
+    const mostVal = mostIdx >= 0 ? parseMw(cols[mostIdx]) : null;
 
     let useVal: number | null = null;
     let isActual = false;
@@ -543,8 +546,6 @@ function buildJoinedRows(
     nnByHe.set(row.he, row);
   }
 
-  let cumulativeSupplyDelta = 0;
-
   return todayStates.map((today) => {
     const nn = nnByHe.get(today.he) ?? null;
 
@@ -561,12 +562,12 @@ function buildJoinedRows(
     const dLoad =
       nnLoad != null && rtLoad != null ? rtLoad - nnLoad : null;
 
+    // Cushion delta vs NN (using whatever cushionMw was computed)
     const todayCushion = today.cushionMw ?? null;
     const nnCushion = nn?.cushionMw ?? null;
-    let hourlySupplyDelta: number | null = null;
+    let nnCushionDelta: number | null = null;
     if (todayCushion != null && nnCushion != null) {
-      hourlySupplyDelta = todayCushion - nnCushion;
-      cumulativeSupplyDelta += hourlySupplyDelta;
+      nnCushionDelta = todayCushion - nnCushion;
     }
 
     return {
@@ -589,9 +590,9 @@ function buildJoinedRows(
       nnSolar: null,
       rtSolar: null,
       dSolar: null,
-      hourlySupplyDelta,
-      cumulativeSupplyDelta:
-        hourlySupplyDelta != null ? cumulativeSupplyDelta : null,
+      nnCushionDelta,
+      hourlySupplyDelta: null,
+      cumulativeSupplyDelta: null,
     };
   });
 }
@@ -748,20 +749,37 @@ export default async function DashboardPage() {
     if (row.nnTielines != null && row.rtTielines != null) {
       row.dTielines = row.rtTielines - row.nnTielines;
     } else {
-      row.dTielines = null;
+      row.dTielines = row.dTielines ?? null;
     }
 
     if (row.nnWind != null && row.rtWind != null) {
       row.dWind = row.rtWind - row.nnWind;
     } else {
-      row.dWind = null;
+      row.dWind = row.dWind ?? null;
     }
 
     if (row.nnSolar != null && row.rtSolar != null) {
       row.dSolar = row.rtSolar - row.nnSolar;
     } else {
-      row.dSolar = null;
+      row.dSolar = row.dSolar ?? null;
     }
+  }
+
+  // Now compute hourly & cumulative supply deltas from components:
+  //   Hourly Δ Supply = ΔWind + ΔSolar − ΔLoad − ΔTielines
+  let cumulativeSupplyDelta = 0;
+  for (const row of rows) {
+    const loadDelta = row.dLoad ?? 0;
+    const tielineDelta = row.dTielines ?? 0;
+    const windDelta = row.dWind ?? 0;
+    const solarDelta = row.dSolar ?? 0;
+
+    const hourly =
+      windDelta + solarDelta - loadDelta - tielineDelta;
+
+    row.hourlySupplyDelta = hourly;
+    cumulativeSupplyDelta += hourly;
+    row.cumulativeSupplyDelta = cumulativeSupplyDelta;
   }
 
   const comparisonDate =
@@ -1035,10 +1053,10 @@ export default async function DashboardPage() {
                           : "—"}
                       </td>
 
-                      {/* NN supply cushion delta (cumulative) */}
+                      {/* NN supply cushion delta (today cushion − NN cushion) */}
                       <td className="px-3 py-2 text-slate-300">
-                        {row.cumulativeSupplyDelta != null
-                          ? formatNumber(row.cumulativeSupplyDelta, 0)
+                        {row.nnCushionDelta != null
+                          ? formatNumber(row.nnCushionDelta, 0)
                           : "—"}
                       </td>
 
