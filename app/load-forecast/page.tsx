@@ -27,6 +27,47 @@ function formatPrice(n: number | null | undefined): string {
   return `$${formatNumber(n, 2)}`;
 }
 
+function formatDelta(
+  actual: number | null | undefined,
+  forecast: number | null | undefined,
+  decimals = 0
+): string {
+  if (
+    actual == null ||
+    forecast == null ||
+    Number.isNaN(actual) ||
+    Number.isNaN(forecast)
+  ) {
+    return "—";
+  }
+  const diff = actual - forecast;
+  const sign = diff > 0 ? "+" : "";
+  return `${sign}${diff.toLocaleString(undefined, {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  })}`;
+}
+
+function formatPriceDelta(
+  actual: number | null | undefined,
+  forecast: number | null | undefined
+): string {
+  if (
+    actual == null ||
+    forecast == null ||
+    Number.isNaN(actual) ||
+    Number.isNaN(forecast)
+  ) {
+    return "$—";
+  }
+  const diff = actual - forecast;
+  const sign = diff > 0 ? "+" : "";
+  return `${sign}${Math.abs(diff).toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
 function approxAlbertaNow() {
   const nowUtc = new Date();
   const nowAb = new Date(nowUtc.getTime() - 7 * 60 * 60 * 1000); // UTC-7
@@ -71,11 +112,12 @@ export default async function LoadForecastPage() {
                 Load &amp; Price Forecast
               </h1>
               <p className="max-w-2xl text-sm text-slate-400">
-                Pure AESO data from the Actual/Forecast WMRQH report. All dates
-                present in the CSV are shown below, one section per report date.
-                For any hour where AESO has published actuals, the actual
-                columns are populated; otherwise only the forecast columns show
-                values. No synthetic modelling is used on this page.
+                Pure AESO data from the Actual/Forecast WMRQH report. All
+                dates present in the CSV are shown below, one section per
+                report date. Where AESO has published actuals, you&apos;ll
+                see both the forecast and actual values plus a delta column
+                showing Actual − Forecast. No synthetic modelling is used on
+                this page.
               </p>
             </div>
 
@@ -130,8 +172,8 @@ export default async function LoadForecastPage() {
                   <p className="text-[11px] text-slate-400">
                     Rows below are taken directly from the AESO
                     Actual/Forecast WMRQH CSV for this date. If a cell shows
-                    &quot;—&quot;, AESO has not published a value yet for that
-                    field (for example, future actuals).
+                    &quot;—&quot;, AESO has not published a value yet for
+                    that field (for example, future actuals).
                   </p>
                 </div>
                 {isToday && (
@@ -148,16 +190,38 @@ export default async function LoadForecastPage() {
                       <th className="px-3 py-2">HE</th>
                       <th className="px-3 py-2">Forecast AIL</th>
                       <th className="px-3 py-2">Actual AIL</th>
-                      <th className="px-3 py-2">Use Actual</th>
+                      <th className="px-3 py-2">Δ AIL (Act − Fcst)</th>
                       <th className="px-3 py-2">Forecast Pool Price</th>
                       <th className="px-3 py-2">Actual Pool Price</th>
-                      <th className="px-3 py-2">Use Actual Price</th>
+                      <th className="px-3 py-2">Δ Price (Act − Fcst)</th>
                     </tr>
                   </thead>
                   <tbody>
                     {rowsForDate.map((r) => {
-                      const useActual = r.actualAil != null;
-                      const useActualPrice = r.actualPoolPrice != null;
+                      const deltaAil =
+                        r.actualAil != null && r.forecastAil != null
+                          ? r.actualAil - r.forecastAil
+                          : null;
+
+                      const deltaPrice =
+                        r.actualPoolPrice != null &&
+                        r.forecastPoolPrice != null
+                          ? r.actualPoolPrice - r.forecastPoolPrice
+                          : null;
+
+                      const deltaAilClass =
+                        deltaAil == null || deltaAil === 0
+                          ? "text-slate-300"
+                          : deltaAil > 0
+                          ? "text-emerald-400"
+                          : "text-red-400";
+
+                      const deltaPriceClass =
+                        deltaPrice == null || deltaPrice === 0
+                          ? "text-slate-300"
+                          : deltaPrice > 0
+                          ? "text-emerald-400"
+                          : "text-red-400";
 
                       return (
                         <tr
@@ -173,8 +237,12 @@ export default async function LoadForecastPage() {
                           <td className="px-3 py-2 text-[11px] text-slate-300">
                             {formatNumber(r.actualAil, 0)}
                           </td>
-                          <td className="px-3 py-2 text-[11px]">
-                            {useActual ? "TRUE" : "FALSE"}
+                          <td
+                            className={
+                              "px-3 py-2 text-[11px] " + deltaAilClass
+                            }
+                          >
+                            {formatDelta(r.actualAil, r.forecastAil, 0)}
                           </td>
                           <td className="px-3 py-2 text-[11px] text-slate-300">
                             {formatPrice(r.forecastPoolPrice)}
@@ -182,8 +250,15 @@ export default async function LoadForecastPage() {
                           <td className="px-3 py-2 text-[11px] text-slate-300">
                             {formatPrice(r.actualPoolPrice)}
                           </td>
-                          <td className="px-3 py-2 text-[11px]">
-                            {useActualPrice ? "TRUE" : "FALSE"}
+                          <td
+                            className={
+                              "px-3 py-2 text-[11px] " + deltaPriceClass
+                            }
+                          >
+                            {formatPriceDelta(
+                              r.actualPoolPrice,
+                              r.forecastPoolPrice
+                            )}
                           </td>
                         </tr>
                       );
