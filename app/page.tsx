@@ -93,8 +93,7 @@ type IntertieSnapshot = {
   path: IntertiePath;
   counterparty: string;
   // Net actual flow from AESO CSD, MW.
-  // Positive/negative sign is whatever AESO publishes; we use it
-  // directly for RT tielines.
+  // Positive = net exports from Alberta, negative = net imports into Alberta.
   actualFlowMw: number | null;
 };
 
@@ -280,8 +279,9 @@ async function loadNnTielinesForDate(
  * We treat each row's timestamp as an instantaneous MW reading and
  * take the simple arithmetic mean of `Actual` within the hour.
  *
- * Example timestamp in CSV: "2025-11-20 10:40"
- *   → hour = 10 → HE 11
+ * In the AESO CSV the first column is "Forecast Transaction Date",
+ * e.g. "2025-11-20 10:40".
+ * We map hour 10 → HE 11, etc.
  */
 function parseShortTermCsvToHeMap(
   csvText: string,
@@ -297,9 +297,7 @@ function parseShortTermCsvToHeMap(
 
   const headers = lines[0].split(",").map((h) => h.trim().toLowerCase());
 
-  // AESO files use "Forecast Transaction Date" as the first column;
-  // we treat anything with "date" or "time" in the name as the
-  // timestamp column.
+  // FIX: AESO header is "Forecast Transaction Date", not "Time"
   const timeIdx = headers.findIndex(
     (h) => h.includes("time") || h.includes("date")
   );
@@ -307,7 +305,7 @@ function parseShortTermCsvToHeMap(
 
   if (timeIdx === -1 || actualIdx === -1) {
     console.error(
-      "Short-term renewables CSV is missing Date/Time or Actual columns."
+      "Short-term renewables CSV is missing Forecast Transaction Date / Actual columns."
     );
     return map;
   }
@@ -323,14 +321,11 @@ function parseShortTermCsvToHeMap(
 
     if (!rawTime) continue;
 
-    // First 10 characters are the date in the CSV (e.g. "2025-11-20" or "2025/11/20")
+    // First 10 characters are the date in the CSV
     const datePart = rawTime.slice(0, 10).replace(/\//g, "-");
     if (datePart !== dateIso) continue;
 
-    // Everything after the first space is the time portion: "HH:MM" or "HH:MM:SS"
-    const spaceIdx = rawTime.indexOf(" ");
-    if (spaceIdx === -1) continue;
-    const timePart = rawTime.slice(spaceIdx + 1);
+    const timePart = rawTime.slice(11); // "HH:MM" or "HH:MM:SS"
     const hourStr = timePart.slice(0, 2);
     const hour = Number(hourStr);
     if (!Number.isFinite(hour)) continue;
@@ -340,7 +335,7 @@ function parseShortTermCsvToHeMap(
 
     if (!rawActual || rawActual === "-" || rawActual === "--") continue;
 
-    // Strip commas (e.g. "1,031" → "1031") before Number()
+    // Strip thousand separators ("1,031" → "1031")
     const cleaned = rawActual.replace(/,/g, "");
     const val = Number(cleaned);
     if (!Number.isFinite(val)) continue;
@@ -480,12 +475,6 @@ function buildJoinedRows(
 
 /* ---------- WMRQH “actual vs forecast” source maps ---------- */
 
-/**
- * For the “today” side, figure out whether each HE’s load/price
- * is coming from AESO actuals or forecasts, based on the WMRQH rows.
- * Also return the *value* we should display for price (actual if
- * available, else forecast).
- */
 function buildSourceMapsForToday(
   allRows: AesoActualForecastRow[],
   todayStates: HourlyState[]
@@ -568,14 +557,10 @@ export default async function DashboardPage() {
       const hist = nnByHe.get(row.he);
       if (!hist) continue;
 
-      // Use NN price from history
       row.nnPrice = hist.nnPrice;
-
-      // Use NN load and today load from the same dataset
       row.nnLoad = hist.nnLoad;
       row.rtLoad = hist.todayLoad ?? row.rtLoad;
 
-      // Recompute price/load deltas based on those values
       row.dPrice =
         row.todayPrice != null && row.nnPrice != null
           ? row.todayPrice - row.nnPrice
@@ -610,8 +595,6 @@ export default async function DashboardPage() {
   }
 
   // Map today’s *current* net interchange from CSD onto the *current Alberta HE* row.
-  // We compute the HE directly from Alberta clock time so the non-zero tieline
-  // appears in the visually current HE.
   const { nowAb } = approxAlbertaNow();
   const currentHeAb = nowAb.getHours() + 1; // 0..23 → HE 1..24
 
