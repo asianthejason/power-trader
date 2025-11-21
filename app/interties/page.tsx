@@ -274,8 +274,8 @@ async function fetchTodayAtcRows(): Promise<{
 
 /* ---------- small display helpers ---------- */
 
-function flowDirection(v: number | null): string {
-  if (v == null) return "—";
+function flowDirection(v: number | null | undefined): string {
+  if (v == null || Number.isNaN(v)) return "—";
   if (v > 0) return "Export from Alberta";
   if (v < 0) return "Import into Alberta";
   return "Balanced";
