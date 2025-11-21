@@ -842,6 +842,7 @@ export default async function DashboardPage() {
 
   const nowState = todayByHe.get(currentHeAb);
   const nowAeso = todaysAesoByHe.get(currentHeAb);
+  const currentRow = rows.find((r) => r.he === currentHeAb) || null;
 
   const currentCushionMw = nowState?.cushionMw ?? null;
   const currentLoadForPct =
@@ -858,13 +859,77 @@ export default async function DashboardPage() {
       : null;
 
   const currentPoolPrice = priceValueByHe.get(currentHeAb) ?? null;
+  const currentNnPrice = currentRow?.nnPrice ?? null;
+  const currentPriceDelta =
+    currentPoolPrice != null && currentNnPrice != null
+      ? currentPoolPrice - currentNnPrice
+      : null;
+
   const currentForecastPrice = nowAeso?.forecastPoolPrice ?? null;
   const currentSmp = (nowAeso as any)?.smp ?? nowState?.smp ?? null;
 
   const currentActualLoad = loadValueByHe.get(currentHeAb) ?? null;
   const currentForecastLoad = nowAeso?.forecastAil ?? null;
 
+  const currentWindMw = currentRow?.rtWind ?? null;
+  const currentSolarMw = currentRow?.rtSolar ?? null;
+  const currentRenewableShare =
+    currentActualLoad != null &&
+    currentWindMw != null &&
+    currentSolarMw != null &&
+    currentActualLoad !== 0
+      ? (currentWindMw + currentSolarMw) / currentActualLoad
+      : null;
+
   const currentFlag = nowState?.cushionFlag;
+
+  // Net interchange summary for interties card
+  const netInterchangeMw = csdSnapshot.systemNetInterchangeMw ?? null;
+  let netInterchangeLabel: string;
+  if (netInterchangeMw == null) {
+    netInterchangeLabel = "Interchange unavailable";
+  } else if (netInterchangeMw > 0) {
+    netInterchangeLabel = `${formatNumber(
+      netInterchangeMw,
+      0
+    )} MW net exports`;
+  } else if (netInterchangeMw < 0) {
+    netInterchangeLabel = `${formatNumber(
+      Math.abs(netInterchangeMw),
+      0
+    )} MW net imports`;
+  } else {
+    netInterchangeLabel = "Balanced (0 MW net interchange)";
+  }
+
+  const intertieSummaries: string[] = [];
+  for (const r of csdSnapshot.rows) {
+    if (r.actualFlowMw == null) continue;
+    const dir =
+      r.actualFlowMw > 0
+        ? "export"
+        : r.actualFlowMw < 0
+        ? "import"
+        : "0 MW";
+    const absVal = Math.abs(r.actualFlowMw);
+    const short =
+      r.path === "AB-BC" ? "BC" : r.path === "AB-SK" ? "SK" : "MATL";
+    intertieSummaries.push(
+      `${short} ${dir} ${formatNumber(absVal, 0)} MW`
+    );
+  }
+
+  // Tightest cushion hour (for quick daily risk sense)
+  let tightestHeLabel: string | null = null;
+  let tightestCushionMw: number | null = null;
+  for (const s of todayStates) {
+    const c = s.cushionMw;
+    if (c == null || Number.isNaN(c)) continue;
+    if (tightestCushionMw == null || c < tightestCushionMw) {
+      tightestCushionMw = c;
+      tightestHeLabel = s.he.toString().padStart(2, "0");
+    }
+  }
 
   const comparisonDate =
     nnResult && nnResult.nnDate ? nnResult.nnDate : "";
@@ -890,7 +955,7 @@ export default async function DashboardPage() {
 
         {/* Top stats */}
         <section className="mt-4 grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-          {/* Current cushion */}
+          {/* 1. Current cushion vs NN */}
           <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
             <p className="text-xs uppercase tracking-wide text-slate-400">
               Current Cushion
@@ -905,16 +970,40 @@ export default async function DashboardPage() {
               {currentCushionPercent != null
                 ? `${(currentCushionPercent * 100).toFixed(1)}% of load`
                 : "—"}
+              {currentRow?.nnCushionDelta != null && (
+                <>
+                  {" "}
+                  · vs NN:{" "}
+                  {currentRow.nnCushionDelta > 0 ? "+" : ""}
+                  {formatNumber(currentRow.nnCushionDelta, 0)} MW
+                </>
+              )}
             </p>
           </div>
 
-          {/* Price card */}
+          {/* 2. Price vs NN */}
           <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
             <p className="text-xs uppercase tracking-wide text-slate-400">
-              Price (Pool / SMP)
+              Price (Pool) vs NN
             </p>
             <p className="mt-2 text-3xl font-semibold">
-              ${formatNumber(currentPoolPrice, 0)}
+              {currentPoolPrice != null
+                ? `$${formatNumber(currentPoolPrice, 0)}`
+                : "$—"}
+            </p>
+            <p className="mt-1 text-xs text-slate-400">
+              NN:{" "}
+              {currentNnPrice != null
+                ? `$${formatNumber(currentNnPrice, 0)}`
+                : "—"}
+              {currentPriceDelta != null && (
+                <>
+                  {" "}
+                  · Δ{" "}
+                  {currentPriceDelta > 0 ? "+" : ""}
+                  {formatNumber(currentPriceDelta, 0)}
+                </>
+              )}
             </p>
             <p className="mt-1 text-xs text-slate-400">
               Forecast: ${formatNumber(currentForecastPrice, 0)} · SMP: $
@@ -922,27 +1011,41 @@ export default async function DashboardPage() {
             </p>
           </div>
 
-          {/* Load card */}
+          {/* 3. Load & renewables share */}
           <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
             <p className="text-xs uppercase tracking-wide text-slate-400">
-              Load (AIL)
+              Load & Renewables (Now)
             </p>
             <p className="mt-2 text-3xl font-semibold">
               {formatNumber(currentActualLoad, 0)}{" "}
               <span className="text-base font-normal text-slate-400">
-                MW
+                MW AIL
               </span>
             </p>
             <p className="mt-1 text-xs text-slate-400">
-              Forecast: {formatNumber(currentForecastLoad, 0)} MW
+              {currentWindMw != null || currentSolarMw != null ? (
+                <>
+                  Wind {formatNumber(currentWindMw, 0)} MW · Solar{" "}
+                  {formatNumber(currentSolarMw, 0)} MW
+                  {currentRenewableShare != null && (
+                    <>
+                      {" "}
+                      ·{" "}
+                      {(currentRenewableShare * 100).toFixed(1)}% of load
+                    </>
+                  )}
+                </>
+              ) : (
+                "Wind / Solar data not available for this HE"
+              )}
             </p>
           </div>
 
-          {/* System status */}
+          {/* 4. System status & interties */}
           <div className="flex flex-col justify-between rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
             <div>
               <p className="text-xs uppercase tracking-wide text-slate-400">
-                System Status
+                System Status & Interties
               </p>
               <div
                 className={
@@ -953,10 +1056,25 @@ export default async function DashboardPage() {
                 <span className="inline-block h-2 w-2 rounded-full bg-current" />
                 {cushionFlagLabel(currentFlag)}
               </div>
+              <p className="mt-2 text-xs text-slate-400">
+                {netInterchangeLabel}
+              </p>
+              <p className="mt-1 text-[11px] text-slate-500">
+                {intertieSummaries.length
+                  ? intertieSummaries.join(" · ")
+                  : "Path detail unavailable"}
+              </p>
             </div>
             <p className="mt-3 text-xs text-slate-400">
               Peak load today: {formatNumber(summary.peakLoad, 0)} MW · Max
               price: ${formatNumber(summary.maxPrice, 0)}
+              {tightestHeLabel && (
+                <>
+                  {" "}
+                  · Tightest cushion: HE {tightestHeLabel} (
+                  {formatNumber(tightestCushionMw, 0)} MW)
+                </>
+              )}
             </p>
           </div>
         </section>
